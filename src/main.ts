@@ -1,6 +1,6 @@
 import './style.css';
 import { mountUi } from './ui';
-import { renderPdf, bitmapToDataUrl } from './pdf';
+import { renderPdf } from './pdf';
 import { findModel, loadModel, type LoadedModel, type ProgressInfo } from './models';
 import { runReview } from './reviewer';
 import { debugBus } from './debug';
@@ -114,13 +114,13 @@ async function review(file: File) {
   });
 
   // Render PDF first so the user sees their file confirmed immediately.
-  let images: ImageBitmap[];
+  let canvases: OffscreenCanvas[];
   try {
-    const { rendered, totalPages, thumbnail } = await renderPdf(file, currentSettings.maxPages);
-    images = rendered;
+    const { rendered, totalPages, thumbnailUrl } = await renderPdf(file, currentSettings.maxPages);
+    canvases = rendered;
     debugBus.info(`pdf: ${totalPages} total page(s), rendered ${rendered.length}`);
     ui.setState({
-      file: { name: file.name, pages: totalPages, thumbnailUrl: bitmapToDataUrl(thumbnail) },
+      file: { name: file.name, pages: totalPages, thumbnailUrl },
     });
   } catch (err) {
     ui.setState({
@@ -155,7 +155,7 @@ async function review(file: File) {
 
   let buffer = '';
   try {
-    await runReview(model, images, {
+    await runReview(model, canvases, {
       onToken: (chunk) => {
         buffer += chunk;
         debugBus.appendRaw(chunk);
