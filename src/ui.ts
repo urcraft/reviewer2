@@ -1,4 +1,5 @@
 import { MODEL_REGISTRY, findModel, tierHint, type Dtype } from './model-registry';
+import { estimateLargestBufferBytes, formatGB, type GpuInfo } from './gpu-info';
 import { loadSettings, saveSettings, type Settings, type Device } from './settings';
 import { debugBus, formatEvents } from './debug';
 import { renderMarkdown } from './markdown';
@@ -27,6 +28,7 @@ export type UiCallbacks = {
 export type Ui = {
   root: HTMLElement;
   setState: (patch: Partial<UiState>) => void;
+  setGpuInfo: (info: GpuInfo) => void;
   getSettings: () => Settings;
   el: { reviewBody: HTMLElement };
 };
@@ -123,11 +125,30 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
   modelSelect.value = settings.modelId;
 
   const modelHint = el('div', { className: 'model-hint' });
+  let gpuInfo: GpuInfo | null = null;
   function syncModelHint() {
     const m = findModel(settings.modelId);
     modelHint.innerHTML = '';
     modelHint.appendChild(el('span', { className: `tier-chip tier-${m.tier}` }, [m.tier]));
     modelHint.appendChild(el('span', { className: 'model-hint-text' }, [`${tierHint(m)} · ${m.sizeNote}`]));
+    // Capacity warning: estimate the largest buffer the model will ask the GPU
+    // to allocate and compare to the adapter's maxBufferSize. If we don't know
+    // the GPU yet, or it's not available, skip silently.
+    if (gpuInfo?.available && gpuInfo.maxBufferBytes) {
+      const need = estimateLargestBufferBytes(m.sizeNote);
+      // 0.85 buffer for the runtime overhead beyond the raw weight blob.
+      if (need > gpuInfo.maxBufferBytes * 0.85) {
+        modelHint.appendChild(
+          el('span', { className: 'capacity-warn', title: 'Likely OOM on this GPU' }, [
+            `⚠ may not fit (GPU buffer ${formatGB(gpuInfo.maxBufferBytes)})`,
+          ]),
+        );
+      }
+    } else if (gpuInfo && !gpuInfo.available) {
+      modelHint.appendChild(
+        el('span', { className: 'capacity-warn' }, ['⚠ no WebGPU — will be slow on CPU']),
+      );
+    }
   }
 
   const pagesSlider = el('input', {
@@ -555,9 +576,15 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     render();
   }
 
+  function setGpuInfo(info: GpuInfo) {
+    gpuInfo = info;
+    syncModelHint();
+  }
+
   return {
     root: shell,
     setState,
+    setGpuInfo,
     getSettings: () => settings,
     el: { reviewBody },
   };

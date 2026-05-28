@@ -5,6 +5,7 @@ import { findModel, type Dtype, type ModelEntry } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
 import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT } from './prompts';
+import { probeGpu, formatGB } from './gpu-info';
 import type { PageImage, WorkerResponse, Device } from './worker-protocol';
 
 const app = document.getElementById('app');
@@ -31,6 +32,20 @@ const ui = mountUi(app, {
   },
 });
 currentSettings = ui.getSettings();
+
+// Probe WebGPU once at startup; log + push into the UI so the model picker can
+// warn when an entry won't fit in the device's per-buffer budget.
+void (async () => {
+  const gpu = await probeGpu();
+  if (gpu.available) {
+    debugBus.info(
+      `webgpu: ${gpu.vendor ?? '?'}/${gpu.architecture ?? '?'} · maxBufferSize ${formatGB(gpu.maxBufferBytes)} · maxStorageBufferBindingSize ${formatGB(gpu.maxStorageBufferBindingBytes)}`,
+    );
+  } else {
+    debugBus.warn(`webgpu unavailable: ${gpu.reason ?? 'unknown'}`);
+  }
+  ui.setGpuInfo(gpu);
+})();
 
 // ---- worker message pump ----------------------------------------------------
 
