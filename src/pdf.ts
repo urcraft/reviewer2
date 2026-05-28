@@ -47,7 +47,9 @@ export async function renderPdf(
 // Some VLM processors in transformers.js (e.g. Qwen2-VL) only handle a single
 // image — passing N pages makes their image-grid math non-integer. For those
 // models we stitch the pages into one tall image with white separators.
-export function stitchPages(pages: PageImage[], gap = 16): PageImage {
+// maxPixels caps the stitched image so a tall multi-page composite doesn't
+// blow up the vision encoder's activation memory (a common WebGPU OOM cause).
+export function stitchPages(pages: PageImage[], gap = 16, maxPixels = 2_000_000): PageImage {
   if (pages.length === 1) return pages[0];
   const width = Math.max(...pages.map((p) => p.width));
   const height = pages.reduce((h, p) => h + p.height, 0) + gap * (pages.length - 1);
@@ -61,7 +63,20 @@ export function stitchPages(pages: PageImage[], gap = 16): PageImage {
     ctx.putImageData(new ImageData(copy, p.width, p.height), 0, y);
     y += p.height + gap;
   }
-  const merged = ctx.getImageData(0, 0, width, height);
-  return { data: merged.data, width, height };
+
+  const px = width * height;
+  if (px <= maxPixels) {
+    const merged = ctx.getImageData(0, 0, width, height);
+    return { data: merged.data, width, height };
+  }
+
+  const s = Math.sqrt(maxPixels / px);
+  const ow = Math.max(1, Math.round(width * s));
+  const oh = Math.max(1, Math.round(height * s));
+  const small = new OffscreenCanvas(ow, oh);
+  const sctx = small.getContext('2d')!;
+  sctx.drawImage(canvas, 0, 0, ow, oh);
+  const merged = sctx.getImageData(0, 0, ow, oh);
+  return { data: merged.data, width: ow, height: oh };
 }
 

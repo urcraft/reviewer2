@@ -1,7 +1,7 @@
 import './style.css';
 import { mountUi } from './ui';
 import { renderPdf, stitchPages } from './pdf';
-import { findModel, type Dtype } from './model-registry';
+import { findModel, type Dtype, type ModelEntry } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
 import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT } from './prompts';
@@ -85,6 +85,33 @@ function chooseDevice(): Device {
 
 function isQ4Dtype(d: string): boolean {
   return d === 'q4' || d === 'q4f16';
+}
+
+// Out-of-memory / device-lost signatures from WebGPU and onnxruntime-web.
+function isCapacityError(msg: string): boolean {
+  return /device is lost|out of memory|failed to allocate|can't create a session|mapasync/i.test(msg);
+}
+
+function isWebGpuish(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    Boolean((err as { isWebGpu?: boolean }).isWebGpu) ||
+    /device is lost|mapasync|webgpu|compute pipeline|valid external instance|gpudevice/.test(msg)
+  );
+}
+
+// WASM can't hold a 2B-class model (single >1GB buffer), so a CPU retry is
+// pointless for the larger models — only the tiny/small ones can fall back.
+function canFallBackToWasm(entry: ModelEntry): boolean {
+  return entry.tier === 'tiny' || entry.tier === 'small';
+}
+
+function capacityMessage(entry: ModelEntry, raw: string): string {
+  return (
+    `“${entry.label}” ran out of memory on this device.\n\n` +
+    `It’s a large model. Open settings (⚙) and pick a smaller one — ` +
+    `SmolVLM 256M or 500M run almost anywhere — or drop the page count.\n\n(${raw})`
+  );
 }
 
 function formatMB(bytes: number): string {
@@ -206,72 +233,76 @@ async function review(file: File) {
     },
   };
 
-  // Load model (with WebGPU→WASM/q8 fallback if needed).
-  try {
-    await ensureModel(device, dtype);
-  } catch (err) {
-    if (device === 'webgpu' && currentSettings.device === 'auto' && (err as { isWebGpu?: boolean }).isWebGpu) {
-      const fb: Dtype = isQ4Dtype(dtype) ? 'q8' : dtype;
-      debugBus.warn(`WebGPU load failed; retrying on CPU (${fb})…`);
-      try {
-        await ensureModel('wasm', fb);
-      } catch (err2) {
-        ui.setState({
-          phase: 'error',
-          phaseLabel: 'Model load failed.',
-          error: errorMessage(err2, 'Could not load the model on WebGPU or CPU. Try a smaller model in settings.'),
-        });
-        return;
-      }
-    } else {
-      ui.setState({
-        phase: 'error',
-        phaseLabel: 'Model load failed.',
-        error: errorMessage(err, 'Could not load the model. Check your network or try a smaller one in settings.'),
-      });
-      return;
-    }
-  }
-
-  // Generate.
-  ui.setState({ phase: 'reviewing', phaseLabel: 'Roasting…', progress: null, progressMeta: '' });
-  try {
+  // One full attempt on a device: load → generate → mark done.
+  async function attempt(dev: Device, dt: Dtype) {
+    await ensureModel(dev, dt);
+    ui.setState({
+      phase: 'reviewing',
+      phaseLabel: dev === 'wasm' ? 'Roasting on CPU (slower)…' : 'Roasting…',
+      progress: null,
+      progressMeta: '',
+    });
     const r = await runGeneration(pages, stream.onToken);
     ui.setState({
       phase: 'done',
-      phaseLabel: r.interrupted ? 'Stopped.' : 'Done. The verdict is in.',
+      phaseLabel: r.interrupted ? 'Stopped.' : `Done. The verdict is in.${dev === 'wasm' ? ' (CPU)' : ''}`,
       progress: 1,
     });
-  } catch (err) {
-    const wgpu = (err as { isWebGpu?: boolean }).isWebGpu;
-    if (wgpu && currentSettings.device === 'auto' && stream.buffer.length === 0) {
-      const fb: Dtype = isQ4Dtype(dtype) ? 'q8' : dtype;
-      debugBus.warn(`WebGPU generation failed; retrying on CPU (${fb})…`);
-      ui.setState({ phase: 'loading-model', phaseLabel: `WebGPU failed — retrying on CPU (${fb})…`, progress: null, progressMeta: '' });
-      try {
-        await ensureModel('wasm', fb);
-        ui.setState({ phase: 'reviewing', phaseLabel: 'Roasting on CPU (slower)…', progress: null, progressMeta: '' });
-        const r = await runGeneration(pages, stream.onToken);
-        ui.setState({
-          phase: 'done',
-          phaseLabel: r.interrupted ? 'Stopped.' : 'Done. The verdict is in. (CPU)',
-          progress: 1,
-        });
-        return;
-      } catch (err2) {
-        ui.setState({
-          phase: 'error',
-          phaseLabel: 'Both WebGPU and CPU paths failed.',
-          error: errorMessage(err2, 'Try a different model in settings — SmolVLM 256M is the most reliable.'),
-        });
-        return;
-      }
+  }
+
+  function showFailure(err: unknown, entry: ModelEntry) {
+    const raw = err instanceof Error ? err.message : String(err);
+    if (isCapacityError(raw)) {
+      ui.setState({ phase: 'error', phaseLabel: 'Out of memory.', error: capacityMessage(entry, raw) });
+    } else {
+      ui.setState({
+        phase: 'error',
+        phaseLabel: 'Generation failed.',
+        error: errorMessage(err, 'Something blew up. Check the debug log, or try a smaller model in settings.'),
+      });
     }
-    ui.setState({
-      phase: 'error',
-      phaseLabel: 'Generation failed.',
-      error: errorMessage(err, 'Something blew up during generation. Check the debug log.'),
-    });
+  }
+
+  try {
+    await attempt(device, dtype);
+  } catch (err) {
+    const eligibleForWasm =
+      device === 'webgpu' &&
+      currentSettings.device === 'auto' &&
+      isWebGpuish(err) &&
+      stream.buffer.length === 0 &&
+      canFallBackToWasm(entry);
+
+    if (eligibleForWasm) {
+      const fb: Dtype = isQ4Dtype(dtype) ? 'q8' : dtype;
+      debugBus.warn(`WebGPU failed; retrying on CPU (${fb})…`);
+      ui.setState({
+        phase: 'loading-model',
+        phaseLabel: `WebGPU failed — retrying on CPU (${fb})…`,
+        progress: null,
+        progressMeta: '',
+      });
+      try {
+        await attempt('wasm', fb);
+      } catch (err2) {
+        showFailure(err2, entry);
+      }
+      return;
+    }
+
+    // Large model on WebGPU: a WASM retry would just download ~1.5GB and fail
+    // on a single oversized buffer. Skip it and tell the user what to do.
+    if (isWebGpuish(err) && !canFallBackToWasm(entry) && stream.buffer.length === 0) {
+      debugBus.warn(`${entry.label} failed on WebGPU and is too large for a CPU retry.`);
+      ui.setState({
+        phase: 'error',
+        phaseLabel: 'Out of memory.',
+        error: capacityMessage(entry, err instanceof Error ? err.message : String(err)),
+      });
+      return;
+    }
+
+    showFailure(err, entry);
   }
 }
 
