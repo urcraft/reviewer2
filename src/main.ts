@@ -1,76 +1,103 @@
 import './style.css';
 import { mountUi } from './ui';
 import { renderPdf } from './pdf';
-import { findModel, loadModel, type Dtype, type LoadedModel, type ProgressInfo } from './models';
-import { runReview } from './reviewer';
+import { findModel, type Dtype } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
+import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT } from './prompts';
+import type { PageImage, WorkerResponse, Device } from './worker-protocol';
 
 const app = document.getElementById('app');
 if (!app) throw new Error('#app not found');
 
+const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+
 let currentSettings = loadSettings();
-let loaded: LoadedModel | null = null;
-let loadedKey: string | null = null;
-let loadingPromise: Promise<LoadedModel> | null = null;
 
 const ui = mountUi(app, {
   onPickFile: (file) => {
     void review(file);
   },
+  onStop: () => {
+    worker.postMessage({ type: 'interrupt' });
+  },
   onSettingsChange: (s) => {
-    const reloadNeeded =
-      s.modelId !== currentSettings.modelId ||
-      s.dtype !== currentSettings.dtype ||
-      s.device !== currentSettings.device;
     currentSettings = s;
     saveSettings(s);
-    if (reloadNeeded) {
-      loaded = null;
-      loadedKey = null;
-      loadingPromise = null;
-      debugBus.info(`settings: ${s.modelId} (dtype ${s.dtype}, device ${s.device})`);
-    }
   },
   onClearCache: async () => {
     await clearAllCaches();
-    loaded = null;
-    loadedKey = null;
-    loadingPromise = null;
     debugBus.info('cache: cleared all model storage');
   },
 });
+currentSettings = ui.getSettings();
 
-function chooseDevice(): 'webgpu' | 'wasm' {
+// ---- worker message pump ----------------------------------------------------
+
+type Pending = {
+  resolveLoad?: () => void;
+  rejectLoad?: (e: Error & { isWebGpu?: boolean }) => void;
+  resolveGen?: (r: { tokens: number; elapsedMs: number; interrupted: boolean }) => void;
+  rejectGen?: (e: Error & { isWebGpu?: boolean }) => void;
+  onToken?: (t: string) => void;
+  onProgress?: (file: string, loaded: number, total: number) => void;
+};
+let pending: Pending = {};
+
+worker.addEventListener('message', (e: MessageEvent<WorkerResponse>) => {
+  const msg = e.data;
+  switch (msg.type) {
+    case 'log':
+      debugBus.log(msg.level, msg.message);
+      break;
+    case 'progress':
+      pending.onProgress?.(msg.file, msg.loaded, msg.total);
+      break;
+    case 'loaded':
+      pending.resolveLoad?.();
+      break;
+    case 'loadError': {
+      const err = Object.assign(new Error(msg.message), { isWebGpu: msg.isWebGpu });
+      pending.rejectLoad?.(err);
+      break;
+    }
+    case 'token':
+      pending.onToken?.(msg.text);
+      break;
+    case 'generated':
+      pending.resolveGen?.({ tokens: msg.tokens, elapsedMs: msg.elapsedMs, interrupted: msg.interrupted });
+      break;
+    case 'generateError': {
+      const err = Object.assign(new Error(msg.message), { isWebGpu: msg.isWebGpu });
+      pending.rejectGen?.(err);
+      break;
+    }
+  }
+});
+
+// ---- helpers ----------------------------------------------------------------
+
+function chooseDevice(): Device {
   if (currentSettings.device === 'wasm') return 'wasm';
   if (currentSettings.device === 'webgpu') return 'webgpu';
-  // 'auto': prefer webgpu when present
   return typeof navigator !== 'undefined' && 'gpu' in navigator ? 'webgpu' : 'wasm';
-}
-
-function isWebGpuError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /WebGPU|valid external Instance|compute pipeline|GPUDevice/i.test(msg);
 }
 
 function isQ4Dtype(d: string): boolean {
   return d === 'q4' || d === 'q4f16';
 }
 
-async function ensureModel(
-  deviceOverride?: 'webgpu' | 'wasm',
-  dtypeOverride?: Dtype,
-): Promise<LoadedModel> {
-  const device = deviceOverride ?? chooseDevice();
-  const entry = findModel(currentSettings.modelId);
-  const dtype =
-    dtypeOverride ??
-    (currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype);
-  const cacheKey = `${entry.id}|${dtype}|${device}`;
-  if (loaded && loadedKey === cacheKey) return loaded;
-  if (loadingPromise && loadedKey === cacheKey) return loadingPromise;
+function formatMB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-  debugBus.info(`model: loading ${entry.id} (dtype ${dtype}, device ${device})`);
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return `${fallback}\n\n${err.message}`;
+  return fallback;
+}
+
+function ensureModel(device: Device, dtype: Dtype): Promise<void> {
+  const entry = findModel(currentSettings.modelId);
   ui.setState({
     phase: 'loading-model',
     phaseLabel: `Loading ${entry.label}${device === 'wasm' ? ' (CPU)' : ''}…`,
@@ -78,60 +105,50 @@ async function ensureModel(
     progressMeta: entry.sizeNote,
   });
 
-  let lastFile = '';
-  let aggregateLoaded = 0;
-  let aggregateTotal = 0;
-  const seenFiles = new Map<string, { loaded: number; total: number }>();
-
-  const onProgress = (info: ProgressInfo) => {
-    if (info.status === 'progress' && info.file) {
-      if (info.file !== lastFile) {
-        debugBus.info(`download: ${info.file}`);
-        lastFile = info.file;
-      }
-      const total = info.total ?? 0;
-      const cur = info.loaded ?? 0;
-      seenFiles.set(info.file, { loaded: cur, total });
-      aggregateLoaded = 0;
-      aggregateTotal = 0;
-      for (const v of seenFiles.values()) {
-        aggregateLoaded += v.loaded;
-        aggregateTotal += v.total;
-      }
-      const pct = aggregateTotal > 0 ? aggregateLoaded / aggregateTotal : null;
-      ui.setState({
-        progress: pct,
-        progressMeta: aggregateTotal > 0
-          ? `${formatMB(aggregateLoaded)} / ${formatMB(aggregateTotal)}`
-          : info.file,
-      });
-    } else if (info.status === 'ready' || info.status === 'done') {
-      debugBus.info(`download: ${info.file ?? ''} done`);
-    } else if (info.status === 'initiate') {
-      debugBus.info(`download: starting ${info.file ?? ''}`);
+  const seen = new Map<string, { loaded: number; total: number }>();
+  pending.onProgress = (file, loaded, total) => {
+    seen.set(file, { loaded, total });
+    let l = 0;
+    let t = 0;
+    for (const v of seen.values()) {
+      l += v.loaded;
+      t += v.total;
     }
+    ui.setState({
+      progress: t > 0 ? l / t : null,
+      progressMeta: t > 0 ? `${formatMB(l)} / ${formatMB(t)}` : file,
+    });
   };
 
-  loadedKey = cacheKey;
-  loadingPromise = (async () => {
-    try {
-      const m = await loadModel(entry, dtype, device, onProgress);
-      debugBus.info(`model: loaded ${entry.id} on ${device}/${dtype}`);
-      loaded = m;
-      return m;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      debugBus.error(`model load failed: ${msg}`);
-      loadingPromise = null;
-      loadedKey = null;
-      throw err;
-    }
-  })();
-
-  return loadingPromise;
+  return new Promise<void>((resolve, reject) => {
+    pending.resolveLoad = resolve;
+    pending.rejectLoad = reject;
+    worker.postMessage({ type: 'load', modelId: entry.id, dtype, device });
+  });
 }
 
+function runGeneration(
+  images: PageImage[],
+  onToken: (t: string) => void,
+): Promise<{ tokens: number; elapsedMs: number; interrupted: boolean }> {
+  pending.onToken = onToken;
+  return new Promise((resolve, reject) => {
+    pending.resolveGen = resolve;
+    pending.rejectGen = reject;
+    worker.postMessage({
+      type: 'generate',
+      images,
+      systemPrompt: REVIEWER_2_SYSTEM_PROMPT,
+      userPrompt: REVIEWER_2_USER_PROMPT,
+      maxNewTokens: 1024,
+    });
+  });
+}
+
+// ---- main flow --------------------------------------------------------------
+
 async function review(file: File) {
+  pending = {};
   debugBus.resetRaw();
   ui.setState({
     reviewMarkdown: '',
@@ -144,15 +161,12 @@ async function review(file: File) {
     progressMeta: '',
   });
 
-  // Render PDF first so the user sees their file confirmed immediately.
-  let canvases: OffscreenCanvas[];
+  let pages: PageImage[];
   try {
-    const { rendered, totalPages, thumbnailUrl } = await renderPdf(file, currentSettings.maxPages);
-    canvases = rendered;
+    const { pages: rendered, totalPages, thumbnailUrl } = await renderPdf(file, currentSettings.maxPages);
+    pages = rendered;
     debugBus.info(`pdf: ${totalPages} total page(s), rendered ${rendered.length}`);
-    ui.setState({
-      file: { name: file.name, pages: totalPages, thumbnailUrl },
-    });
+    ui.setState({ file: { name: file.name, pages: totalPages, thumbnailUrl } });
   } catch (err) {
     ui.setState({
       phase: 'error',
@@ -162,83 +176,79 @@ async function review(file: File) {
     return;
   }
 
-  let model: LoadedModel;
-  try {
-    model = await ensureModel();
-  } catch (err) {
-    ui.setState({
-      phase: 'error',
-      phaseLabel: 'Model load failed.',
-      progress: null,
-      progressMeta: '',
-      error: errorMessage(err, 'Could not load the model. Check your network or try a smaller one in settings.'),
-    });
-    return;
-  }
-
-  // run review
-  ui.setState({
-    phase: 'reviewing',
-    phaseLabel: 'Roasting…',
-    progress: null,
-    progressMeta: '',
-  });
+  const entry = findModel(currentSettings.modelId);
+  const dtype: Dtype =
+    currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
+  const device = chooseDevice();
 
   const stream = {
     buffer: '',
-    onToken: (chunk: string) => {
+    tokens: 0,
+    start: 0,
+    onToken(chunk: string) {
+      if (stream.start === 0) stream.start = performance.now();
       stream.buffer += chunk;
+      stream.tokens += 1;
       debugBus.appendRaw(chunk);
-      ui.setState({ reviewMarkdown: stream.buffer });
-    },
-    onStats: ({ tokens, elapsedMs }: { tokens: number; elapsedMs: number }) => {
+      const elapsedMs = performance.now() - stream.start;
       ui.setState({
-        tokens,
+        reviewMarkdown: stream.buffer,
+        tokens: stream.tokens,
         elapsedMs,
-        progressMeta: `${tokens} tok · ${(tokens / (elapsedMs / 1000)).toFixed(1)} tok/s`,
+        progressMeta: `${stream.tokens} tok · ${(stream.tokens / (elapsedMs / 1000)).toFixed(1)} tok/s`,
       });
     },
   };
 
+  // Load model (with WebGPU→WASM/q8 fallback if needed).
   try {
-    await runReview(model, canvases, { onToken: stream.onToken, onStats: stream.onStats });
+    await ensureModel(device, dtype);
+  } catch (err) {
+    if (device === 'webgpu' && currentSettings.device === 'auto' && (err as { isWebGpu?: boolean }).isWebGpu) {
+      const fb: Dtype = isQ4Dtype(dtype) ? 'q8' : dtype;
+      debugBus.warn(`WebGPU load failed; retrying on CPU (${fb})…`);
+      try {
+        await ensureModel('wasm', fb);
+      } catch (err2) {
+        ui.setState({
+          phase: 'error',
+          phaseLabel: 'Model load failed.',
+          error: errorMessage(err2, 'Could not load the model on WebGPU or CPU. Try a smaller model in settings.'),
+        });
+        return;
+      }
+    } else {
+      ui.setState({
+        phase: 'error',
+        phaseLabel: 'Model load failed.',
+        error: errorMessage(err, 'Could not load the model. Check your network or try a smaller one in settings.'),
+      });
+      return;
+    }
+  }
+
+  // Generate.
+  ui.setState({ phase: 'reviewing', phaseLabel: 'Roasting…', progress: null, progressMeta: '' });
+  try {
+    const r = await runGeneration(pages, stream.onToken);
     ui.setState({
       phase: 'done',
-      phaseLabel: 'Done. The verdict is in.',
+      phaseLabel: r.interrupted ? 'Stopped.' : 'Done. The verdict is in.',
       progress: 1,
     });
-    return;
   } catch (err) {
-    // Auto-fallback: if WebGPU blew up and the user hasn't pinned a device,
-    // reload on WASM and retry once. q4/q4f16 use GatherBlockQuantized which
-    // has no CPU kernel, so fall back to q8 in that case.
-    const entry = findModel(currentSettings.modelId);
-    const currentDtype = currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
-    const wgpuFailed = isWebGpuError(err) && stream.buffer.length === 0;
-    if (currentSettings.device === 'auto' && wgpuFailed) {
-      const fallbackDtype: Dtype = isQ4Dtype(currentDtype) ? 'q8' : currentDtype;
-      debugBus.warn(`WebGPU failed; retrying on WASM with dtype ${fallbackDtype}…`);
-      loaded = null;
-      loadedKey = null;
-      loadingPromise = null;
-      ui.setState({
-        phase: 'loading-model',
-        phaseLabel: `WebGPU failed — retrying on CPU (${fallbackDtype})…`,
-        progress: null,
-        progressMeta: '',
-      });
+    const wgpu = (err as { isWebGpu?: boolean }).isWebGpu;
+    if (wgpu && currentSettings.device === 'auto' && stream.buffer.length === 0) {
+      const fb: Dtype = isQ4Dtype(dtype) ? 'q8' : dtype;
+      debugBus.warn(`WebGPU generation failed; retrying on CPU (${fb})…`);
+      ui.setState({ phase: 'loading-model', phaseLabel: `WebGPU failed — retrying on CPU (${fb})…`, progress: null, progressMeta: '' });
       try {
-        const wasmModel = await ensureModel('wasm', fallbackDtype);
-        ui.setState({
-          phase: 'reviewing',
-          phaseLabel: 'Roasting on CPU (slower)…',
-          progress: null,
-          progressMeta: '',
-        });
-        await runReview(wasmModel, canvases, { onToken: stream.onToken, onStats: stream.onStats });
+        await ensureModel('wasm', fb);
+        ui.setState({ phase: 'reviewing', phaseLabel: 'Roasting on CPU (slower)…', progress: null, progressMeta: '' });
+        const r = await runGeneration(pages, stream.onToken);
         ui.setState({
           phase: 'done',
-          phaseLabel: 'Done. The verdict is in. (CPU)',
+          phaseLabel: r.interrupted ? 'Stopped.' : 'Done. The verdict is in. (CPU)',
           progress: 1,
         });
         return;
@@ -246,12 +256,7 @@ async function review(file: File) {
         ui.setState({
           phase: 'error',
           phaseLabel: 'Both WebGPU and CPU paths failed.',
-          error: errorMessage(
-            err2,
-            `WebGPU error: ${err instanceof Error ? err.message : String(err)}\n\n` +
-              `CPU fallback (${fallbackDtype}) error: see below. ` +
-              `Try a different model in settings — SmolVLM 256M is the most reliable smoke test.`,
-          ),
+          error: errorMessage(err2, 'Try a different model in settings — SmolVLM 256M is the most reliable.'),
         });
         return;
       }
@@ -264,17 +269,7 @@ async function review(file: File) {
   }
 }
 
-function formatMB(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function errorMessage(err: unknown, fallback: string): string {
-  if (err instanceof Error) return `${fallback}\n\n${err.message}`;
-  return fallback;
-}
-
 async function clearAllCaches() {
-  // Wipe IndexedDB databases used by transformers.js for model files.
   if ('databases' in indexedDB) {
     const dbs = await (indexedDB as IDBFactory & { databases: () => Promise<{ name?: string }[]> }).databases();
     for (const d of dbs) {
@@ -288,12 +283,8 @@ async function clearAllCaches() {
       }
     }
   }
-  // Also wipe CacheStorage entries that transformers.js may use.
   if ('caches' in window) {
     const keys = await caches.keys();
     await Promise.all(keys.map((k) => caches.delete(k)));
   }
 }
-
-// surface settings change source-of-truth from ui
-currentSettings = ui.getSettings();

@@ -1,11 +1,3 @@
-import {
-  AutoProcessor,
-  AutoModelForImageTextToText,
-  Gemma4ForConditionalGeneration,
-  type PreTrainedModel,
-  type Processor,
-} from '@huggingface/transformers';
-
 export type Dtype = 'q4' | 'q4f16' | 'q8' | 'fp16' | 'fp32';
 
 export type ModelClassId = 'Gemma4ForConditionalGeneration' | 'AutoModelForImageTextToText';
@@ -84,43 +76,4 @@ export const MODEL_REGISTRY: ModelEntry[] = [
 
 export function findModel(id: string): ModelEntry {
   return MODEL_REGISTRY.find((m) => m.id === id) ?? MODEL_REGISTRY[0];
-}
-
-export type LoadedModel = {
-  entry: ModelEntry;
-  processor: Processor;
-  model: PreTrainedModel;
-};
-
-export type ProgressInfo = {
-  status: string;
-  file?: string;
-  progress?: number;
-  loaded?: number;
-  total?: number;
-};
-
-const MODEL_CLASSES = {
-  Gemma4ForConditionalGeneration,
-  AutoModelForImageTextToText,
-} as const;
-
-export async function loadModel(
-  entry: ModelEntry,
-  dtype: Dtype,
-  device: 'webgpu' | 'wasm',
-  onProgress: (info: ProgressInfo) => void,
-): Promise<LoadedModel> {
-  const processor = (await AutoProcessor.from_pretrained(entry.id, {
-    progress_callback: onProgress as never,
-  })) as unknown as Processor;
-
-  const ModelClass = MODEL_CLASSES[entry.modelClass];
-  const model = (await ModelClass.from_pretrained(entry.id, {
-    dtype,
-    device,
-    progress_callback: onProgress as never,
-  })) as unknown as PreTrainedModel;
-
-  return { entry, processor, model };
 }

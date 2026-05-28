@@ -1,4 +1,4 @@
-import { MODEL_REGISTRY, type Dtype } from './models';
+import { MODEL_REGISTRY, type Dtype } from './model-registry';
 
 const KEY = 'reviewer2.settings.v1';
 

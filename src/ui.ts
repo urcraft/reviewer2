@@ -1,4 +1,4 @@
-import { MODEL_REGISTRY, findModel, type Dtype } from './models';
+import { MODEL_REGISTRY, findModel, type Dtype } from './model-registry';
 import { loadSettings, saveSettings, type Settings, type Device } from './settings';
 import { debugBus, formatEvents } from './debug';
 import { renderMarkdown } from './markdown';
@@ -19,6 +19,7 @@ export type UiState = {
 
 export type UiCallbacks = {
   onPickFile: (file: File) => void;
+  onStop: () => void;
   onSettingsChange: (s: Settings) => void;
   onClearCache: () => Promise<void>;
 };
@@ -137,7 +138,11 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
   const reviewBtn = el('button', {
     className: 'btn-primary',
     onclick: () => {
-      if (currentFile) cbs.onPickFile(currentFile);
+      if (isBusy()) {
+        cbs.onStop();
+      } else if (currentFile) {
+        cbs.onPickFile(currentFile);
+      }
     },
   }, ['Roast it']) as HTMLButtonElement;
   reviewBtn.disabled = true;
@@ -465,12 +470,26 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     cbs.onPickFile(f);
   }
 
+  function isBusy() {
+    return (
+      state.phase === 'loading-model' ||
+      state.phase === 'rendering-pdf' ||
+      state.phase === 'reviewing'
+    );
+  }
+
   // ---------- render ----------
   function render() {
     // Status bar only matters when something's happening.
     status.style.display = state.phase === 'idle' ? 'none' : '';
     statusPhase.textContent = state.phaseLabel;
     statusMeta.textContent = state.progressMeta;
+
+    // The primary button doubles as Stop while work is in flight.
+    const busy = isBusy();
+    reviewBtn.textContent = busy ? 'Stop' : 'Roast it';
+    reviewBtn.classList.toggle('btn-stop', busy);
+    reviewBtn.disabled = busy ? false : !currentFile;
     if (state.progress === null) {
       progress.classList.add('indeterminate');
       progressBar.style.width = '30%';

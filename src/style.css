@@ -342,6 +342,13 @@ body {
   cursor: not-allowed;
   box-shadow: none;
 }
+.btn-primary.btn-stop {
+  background: var(--surface-2);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  box-shadow: none;
+}
+.btn-primary.btn-stop:hover { background: var(--accent-soft); }
 
 .btn-ghost {
   appearance: none;

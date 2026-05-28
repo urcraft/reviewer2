@@ -1,11 +1,12 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import type { PageImage } from './worker-protocol';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
 
 export type RenderedPdf = {
   totalPages: number;
-  rendered: OffscreenCanvas[];
+  pages: PageImage[];
   thumbnailUrl: string;
 };
 
@@ -17,7 +18,7 @@ export async function renderPdf(
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
   const n = Math.min(maxPages, pdf.numPages);
-  const rendered: OffscreenCanvas[] = [];
+  const pages: PageImage[] = [];
   let thumbnailUrl = '';
 
   for (let i = 1; i <= n; i++) {
@@ -26,7 +27,8 @@ export async function renderPdf(
     const canvas = new OffscreenCanvas(viewport.width, viewport.height);
     const ctx = canvas.getContext('2d')!;
     await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise;
-    rendered.push(canvas);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    pages.push({ data: imageData.data, width: canvas.width, height: canvas.height });
 
     if (i === 1) {
       const thumbScale = 0.5;
@@ -39,5 +41,5 @@ export async function renderPdf(
     }
   }
 
-  return { totalPages: pdf.numPages, rendered, thumbnailUrl };
+  return { totalPages: pdf.numPages, pages, thumbnailUrl };
 }
