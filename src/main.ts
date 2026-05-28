@@ -11,6 +11,7 @@ if (!app) throw new Error('#app not found');
 
 let currentSettings = loadSettings();
 let loaded: LoadedModel | null = null;
+let loadedDevice: 'webgpu' | 'wasm' | null = null;
 let loadingPromise: Promise<LoadedModel> | null = null;
 
 const ui = mountUi(app, {
@@ -18,33 +19,51 @@ const ui = mountUi(app, {
     void review(file);
   },
   onSettingsChange: (s) => {
-    const modelChanged = s.modelId !== currentSettings.modelId || s.dtype !== currentSettings.dtype;
+    const reloadNeeded =
+      s.modelId !== currentSettings.modelId ||
+      s.dtype !== currentSettings.dtype ||
+      s.device !== currentSettings.device;
     currentSettings = s;
     saveSettings(s);
-    if (modelChanged) {
+    if (reloadNeeded) {
       loaded = null;
+      loadedDevice = null;
       loadingPromise = null;
-      debugBus.info(`settings: model changed to ${s.modelId} (dtype ${s.dtype})`);
+      debugBus.info(`settings: ${s.modelId} (dtype ${s.dtype}, device ${s.device})`);
     }
   },
   onClearCache: async () => {
     await clearAllCaches();
     loaded = null;
+    loadedDevice = null;
     loadingPromise = null;
     debugBus.info('cache: cleared all model storage');
   },
 });
 
-async function ensureModel(): Promise<LoadedModel> {
-  if (loaded) return loaded;
-  if (loadingPromise) return loadingPromise;
+function chooseDevice(): 'webgpu' | 'wasm' {
+  if (currentSettings.device === 'wasm') return 'wasm';
+  if (currentSettings.device === 'webgpu') return 'webgpu';
+  // 'auto': prefer webgpu when present
+  return typeof navigator !== 'undefined' && 'gpu' in navigator ? 'webgpu' : 'wasm';
+}
+
+function isWebGpuError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /WebGPU|valid external Instance|compute pipeline|GPUDevice/i.test(msg);
+}
+
+async function ensureModel(deviceOverride?: 'webgpu' | 'wasm'): Promise<LoadedModel> {
+  const device = deviceOverride ?? chooseDevice();
+  if (loaded && loadedDevice === device) return loaded;
+  if (loadingPromise && loadedDevice === device) return loadingPromise;
 
   const entry = findModel(currentSettings.modelId);
   const dtype = currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
-  debugBus.info(`model: loading ${entry.id} (dtype ${dtype}, device webgpu)`);
+  debugBus.info(`model: loading ${entry.id} (dtype ${dtype}, device ${device})`);
   ui.setState({
     phase: 'loading-model',
-    phaseLabel: `Loading ${entry.label}…`,
+    phaseLabel: `Loading ${entry.label}${device === 'wasm' ? ' (CPU)' : ''}…`,
     progress: null,
     progressMeta: entry.sizeNote,
   });
@@ -83,16 +102,18 @@ async function ensureModel(): Promise<LoadedModel> {
     }
   };
 
+  loadedDevice = device;
   loadingPromise = (async () => {
     try {
-      const m = await loadModel(entry, dtype, onProgress);
-      debugBus.info(`model: loaded ${entry.id}`);
+      const m = await loadModel(entry, dtype, device, onProgress);
+      debugBus.info(`model: loaded ${entry.id} on ${device}`);
       loaded = m;
       return m;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       debugBus.error(`model load failed: ${msg}`);
       loadingPromise = null;
+      loadedDevice = null;
       throw err;
     }
   })();
@@ -153,28 +174,73 @@ async function review(file: File) {
     progressMeta: '',
   });
 
-  let buffer = '';
+  const stream = {
+    buffer: '',
+    onToken: (chunk: string) => {
+      stream.buffer += chunk;
+      debugBus.appendRaw(chunk);
+      ui.setState({ reviewMarkdown: stream.buffer });
+    },
+    onStats: ({ tokens, elapsedMs }: { tokens: number; elapsedMs: number }) => {
+      ui.setState({
+        tokens,
+        elapsedMs,
+        progressMeta: `${tokens} tok · ${(tokens / (elapsedMs / 1000)).toFixed(1)} tok/s`,
+      });
+    },
+  };
+
   try {
-    await runReview(model, canvases, {
-      onToken: (chunk) => {
-        buffer += chunk;
-        debugBus.appendRaw(chunk);
-        ui.setState({ reviewMarkdown: buffer });
-      },
-      onStats: ({ tokens, elapsedMs }) => {
-        ui.setState({
-          tokens,
-          elapsedMs,
-          progressMeta: `${tokens} tok · ${(tokens / (elapsedMs / 1000)).toFixed(1)} tok/s`,
-        });
-      },
-    });
+    await runReview(model, canvases, { onToken: stream.onToken, onStats: stream.onStats });
     ui.setState({
       phase: 'done',
       phaseLabel: 'Done. The verdict is in.',
       progress: 1,
     });
+    return;
   } catch (err) {
+    // Auto-fallback: if WebGPU blew up mid-generation and the user hasn't
+    // pinned a specific device, reload on WASM and retry once.
+    if (
+      currentSettings.device === 'auto' &&
+      loadedDevice === 'webgpu' &&
+      isWebGpuError(err) &&
+      stream.buffer.length === 0
+    ) {
+      debugBus.warn('WebGPU failed; retrying on WASM (CPU)…');
+      loaded = null;
+      loadedDevice = null;
+      loadingPromise = null;
+      ui.setState({
+        phase: 'loading-model',
+        phaseLabel: 'WebGPU failed — retrying on CPU…',
+        progress: null,
+        progressMeta: '',
+      });
+      try {
+        const wasmModel = await ensureModel('wasm');
+        ui.setState({
+          phase: 'reviewing',
+          phaseLabel: 'Roasting on CPU (slower)…',
+          progress: null,
+          progressMeta: '',
+        });
+        await runReview(wasmModel, canvases, { onToken: stream.onToken, onStats: stream.onStats });
+        ui.setState({
+          phase: 'done',
+          phaseLabel: 'Done. The verdict is in. (CPU)',
+          progress: 1,
+        });
+        return;
+      } catch (err2) {
+        ui.setState({
+          phase: 'error',
+          phaseLabel: 'Generation failed (CPU fallback also failed).',
+          error: errorMessage(err2, 'Both WebGPU and CPU paths failed. Try a smaller model in settings.'),
+        });
+        return;
+      }
+    }
     ui.setState({
       phase: 'error',
       phaseLabel: 'Generation failed.',

@@ -108,6 +108,7 @@ const MODEL_CLASSES = {
 export async function loadModel(
   entry: ModelEntry,
   dtype: Dtype,
+  device: 'webgpu' | 'wasm',
   onProgress: (info: ProgressInfo) => void,
 ): Promise<LoadedModel> {
   const processor = (await AutoProcessor.from_pretrained(entry.id, {
@@ -117,7 +118,7 @@ export async function loadModel(
   const ModelClass = MODEL_CLASSES[entry.modelClass];
   const model = (await ModelClass.from_pretrained(entry.id, {
     dtype,
-    device: 'webgpu',
+    device,
     progress_callback: onProgress as never,
   })) as unknown as PreTrainedModel;
 

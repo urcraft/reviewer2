@@ -1,5 +1,5 @@
 import { MODEL_REGISTRY, findModel, type Dtype } from './models';
-import { loadSettings, saveSettings, type Settings } from './settings';
+import { loadSettings, saveSettings, type Settings, type Device } from './settings';
 import { debugBus, formatEvents } from './debug';
 import { renderMarkdown } from './markdown';
 
@@ -31,6 +31,11 @@ export type Ui = {
 };
 
 const DTYPE_OPTIONS: Array<Dtype | 'default'> = ['default', 'q4', 'q4f16', 'q8', 'fp16'];
+const DEVICE_OPTIONS: Array<{ value: Device; label: string }> = [
+  { value: 'auto', label: 'auto (WebGPU with CPU fallback)' },
+  { value: 'webgpu', label: 'WebGPU only' },
+  { value: 'wasm', label: 'CPU (WASM) only' },
+];
 
 export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
   let settings = loadSettings();
@@ -309,6 +314,22 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       dtypeSel.appendChild(opt);
     }
 
+    const deviceSel = el('select', {
+      className: 'field-select',
+      onchange: (e: Event) => {
+        const v = (e.target as HTMLSelectElement).value as Device;
+        settings = { ...settings, device: v };
+        saveSettings(settings);
+        cbs.onSettingsChange(settings);
+      },
+    }) as HTMLSelectElement;
+    for (const d of DEVICE_OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = d.value;
+      opt.textContent = d.label;
+      deviceSel.appendChild(opt);
+    }
+
     const clearBtn = el('button', {
       className: 'btn-ghost',
       onclick: async () => {
@@ -340,6 +361,13 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
         ]),
       ]),
       el('div', { className: 'field' }, [
+        el('label', { className: 'field-label' }, ['Device']),
+        deviceSel,
+        el('div', { className: 'field-help' }, [
+          'WebGPU is much faster but some browsers / models hit driver bugs (look for "compute pipeline" errors). Auto falls back to CPU if WebGPU blows up mid-generation.',
+        ]),
+      ]),
+      el('div', { className: 'field' }, [
         el('label', { className: 'field-label' }, ['Cache']),
         clearBtn,
         el('div', { className: 'field-help' }, [
@@ -366,6 +394,7 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       pagesIn.value = String(settings.maxPages);
       pagesValD.textContent = String(settings.maxPages);
       dtypeSel.value = settings.dtype;
+      deviceSel.value = settings.device;
       modelHelp.textContent = describeModel(settings.modelId);
     }
 

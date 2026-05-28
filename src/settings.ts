@@ -2,10 +2,13 @@ import { MODEL_REGISTRY, type Dtype } from './models';
 
 const KEY = 'reviewer2.settings.v1';
 
+export type Device = 'auto' | 'webgpu' | 'wasm';
+
 export type Settings = {
   modelId: string;
   maxPages: number;
   dtype: Dtype | 'default';
+  device: Device;
   showDebug: boolean;
 };
 
@@ -13,6 +16,7 @@ const DEFAULTS: Settings = {
   modelId: MODEL_REGISTRY[0].id,
   maxPages: 3,
   dtype: 'default',
+  device: 'auto',
   showDebug: false,
 };
 
