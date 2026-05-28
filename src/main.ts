@@ -5,7 +5,7 @@ import { findModel, type Dtype, type ModelEntry } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
 import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT } from './prompts';
-import { probeGpu, formatGB } from './gpu-info';
+import { probeGpu, estimateLargestBufferBytes, formatGB, type GpuInfo } from './gpu-info';
 import type { PageImage, WorkerResponse, Device } from './worker-protocol';
 
 const app = document.getElementById('app');
@@ -35,17 +35,25 @@ currentSettings = ui.getSettings();
 
 // Probe WebGPU once at startup; log + push into the UI so the model picker can
 // warn when an entry won't fit in the device's per-buffer budget.
+let gpuInfo: GpuInfo | null = null;
 void (async () => {
-  const gpu = await probeGpu();
-  if (gpu.available) {
+  gpuInfo = await probeGpu();
+  if (gpuInfo.available) {
     debugBus.info(
-      `webgpu: ${gpu.vendor ?? '?'}/${gpu.architecture ?? '?'} · maxBufferSize ${formatGB(gpu.maxBufferBytes)} · maxStorageBufferBindingSize ${formatGB(gpu.maxStorageBufferBindingBytes)}`,
+      `webgpu: ${gpuInfo.vendor ?? '?'}/${gpuInfo.architecture ?? '?'} · maxBufferSize ${formatGB(gpuInfo.maxBufferBytes)} · maxStorageBufferBindingSize ${formatGB(gpuInfo.maxStorageBufferBindingBytes)}`,
     );
   } else {
-    debugBus.warn(`webgpu unavailable: ${gpu.reason ?? 'unknown'}`);
+    debugBus.warn(`webgpu unavailable: ${gpuInfo.reason ?? 'unknown'}`);
   }
-  ui.setGpuInfo(gpu);
+  ui.setGpuInfo(gpuInfo);
 })();
+
+// True when the model's largest buffer is too close to the GPU's per-buffer
+// ceiling — the same check the UI uses for the "may not fit" chip.
+function isCapacityConstrained(entry: ModelEntry): boolean {
+  if (!gpuInfo?.available || !gpuInfo.maxBufferBytes) return false;
+  return estimateLargestBufferBytes(entry.sizeNote) > gpuInfo.maxBufferBytes * 0.85;
+}
 
 // ---- worker message pump ----------------------------------------------------
 
@@ -122,10 +130,15 @@ function canFallBackToWasm(entry: ModelEntry): boolean {
 }
 
 function capacityMessage(entry: ModelEntry, raw: string): string {
+  const need = estimateLargestBufferBytes(entry.sizeNote);
+  const budget = gpuInfo?.maxBufferBytes;
+  const sizeLine =
+    need && budget
+      ? `Your GPU's per-buffer ceiling is ${formatGB(budget)}; "${entry.label}" needs ~${formatGB(need)} just for weights, and the KV cache + activations during generation push past the limit. This is a hard WebGPU/driver cap, not a global memory budget — closing tabs won't help.`
+      : `“${entry.label}” exceeded the GPU's per-buffer budget on this device.`;
   return (
-    `“${entry.label}” ran out of memory on this device.\n\n` +
-    `It’s a large model. Open settings (⚙) and pick a smaller one — ` +
-    `SmolVLM 256M or 500M run almost anywhere — or drop the page count.\n\n(${raw})`
+    `${sizeLine}\n\n` +
+    `Open settings (⚙) and pick a smaller model — SmolVLM 500M (~600 MB) is the next-best quality that fits, or SmolVLM 256M for max safety.\n\n(${raw})`
   );
 }
 
@@ -171,6 +184,7 @@ function ensureModel(device: Device, dtype: Dtype): Promise<void> {
 
 function runGeneration(
   images: PageImage[],
+  maxNewTokens: number,
   onToken: (t: string) => void,
 ): Promise<{ tokens: number; elapsedMs: number; interrupted: boolean }> {
   pending.onToken = onToken;
@@ -182,7 +196,7 @@ function runGeneration(
       images,
       systemPrompt: REVIEWER_2_SYSTEM_PROMPT,
       userPrompt: REVIEWER_2_USER_PROMPT,
-      maxNewTokens: 1024,
+      maxNewTokens,
     });
   });
 }
@@ -223,9 +237,21 @@ async function review(file: File) {
     currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
   const device = chooseDevice();
 
+  // When the model is right at the GPU's per-buffer ceiling, shrink the inputs
+  // so the KV cache + vision activations don't push past the limit:
+  // smaller stitched image, tighter token budget.
+  const constrained = isCapacityConstrained(entry);
+  const stitchCap = constrained ? 1_000_000 : 2_000_000;
+  const maxNewTokens = constrained ? 384 : 1024;
+  if (constrained) {
+    debugBus.warn(
+      `capacity-constrained: shrinking inputs (image≤${stitchCap.toLocaleString()}px, ${maxNewTokens} tokens)`,
+    );
+  }
+
   // Qwen2-VL's transformers.js processor only handles one image — stitch first.
   if (entry.singleImage && pages.length > 1) {
-    pages = [stitchPages(pages)];
+    pages = [stitchPages(pages, 16, stitchCap)];
     debugBus.info(`pages stitched into 1 image for ${entry.label}`);
   }
 
@@ -257,7 +283,7 @@ async function review(file: File) {
       progress: null,
       progressMeta: '',
     });
-    const r = await runGeneration(pages, stream.onToken);
+    const r = await runGeneration(pages, maxNewTokens, stream.onToken);
     ui.setState({
       phase: 'done',
       phaseLabel: r.interrupted ? 'Stopped.' : `Done. The verdict is in.${dev === 'wasm' ? ' (CPU)' : ''}`,
