@@ -438,6 +438,8 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
 
   // ---------- render ----------
   function render() {
+    // Status bar only matters when something's happening.
+    status.style.display = state.phase === 'idle' ? 'none' : '';
     statusPhase.textContent = state.phaseLabel;
     statusMeta.textContent = state.progressMeta;
     if (state.progress === null) {

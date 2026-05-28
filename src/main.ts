@@ -107,8 +107,29 @@ async function review(file: File) {
     tokens: 0,
     elapsedMs: 0,
     error: null,
-    phase: 'idle',
+    phase: 'rendering-pdf',
+    phaseLabel: 'Rendering pages…',
+    progress: null,
+    progressMeta: '',
   });
+
+  // Render PDF first so the user sees their file confirmed immediately.
+  let images: ImageBitmap[];
+  try {
+    const { rendered, totalPages, thumbnail } = await renderPdf(file, currentSettings.maxPages);
+    images = rendered;
+    debugBus.info(`pdf: ${totalPages} total page(s), rendered ${rendered.length}`);
+    ui.setState({
+      file: { name: file.name, pages: totalPages, thumbnailUrl: bitmapToDataUrl(thumbnail) },
+    });
+  } catch (err) {
+    ui.setState({
+      phase: 'error',
+      phaseLabel: 'PDF parse failed.',
+      error: errorMessage(err, 'Could not read that PDF. Is it actually a PDF?'),
+    });
+    return;
+  }
 
   let model: LoadedModel;
   try {
@@ -123,33 +144,6 @@ async function review(file: File) {
     });
     return;
   }
-
-  // render pdf
-  ui.setState({
-    phase: 'rendering-pdf',
-    phaseLabel: 'Rendering pages…',
-    progress: null,
-    progressMeta: '',
-  });
-  let images: ImageBitmap[];
-  let pdfMeta: { totalPages: number; thumbUrl: string };
-  try {
-    const { rendered, totalPages, thumbnail } = await renderPdf(file, currentSettings.maxPages);
-    images = rendered;
-    pdfMeta = { totalPages, thumbUrl: bitmapToDataUrl(thumbnail) };
-    debugBus.info(`pdf: ${totalPages} total page(s), rendered ${rendered.length}`);
-  } catch (err) {
-    ui.setState({
-      phase: 'error',
-      phaseLabel: 'PDF parse failed.',
-      error: errorMessage(err, 'Could not read that PDF. Is it actually a PDF?'),
-    });
-    return;
-  }
-
-  ui.setState({
-    file: { name: file.name, pages: pdfMeta.totalPages, thumbnailUrl: pdfMeta.thumbUrl },
-  });
 
   // run review
   ui.setState({
