@@ -1,4 +1,4 @@
-import { MODEL_REGISTRY, findModel, type Dtype } from './model-registry';
+import { MODEL_REGISTRY, findModel, tierHint, type Dtype } from './model-registry';
 import { loadSettings, saveSettings, type Settings, type Device } from './settings';
 import { debugBus, formatEvents } from './debug';
 import { renderMarkdown } from './markdown';
@@ -111,6 +111,7 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       settings = { ...settings, modelId: id, dtype: 'default' };
       saveSettings(settings);
       cbs.onSettingsChange(settings);
+      syncModelHint();
     },
   }) as HTMLSelectElement;
   for (const m of MODEL_REGISTRY) {
@@ -120,6 +121,14 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     modelSelect.appendChild(opt);
   }
   modelSelect.value = settings.modelId;
+
+  const modelHint = el('div', { className: 'model-hint' });
+  function syncModelHint() {
+    const m = findModel(settings.modelId);
+    modelHint.innerHTML = '';
+    modelHint.appendChild(el('span', { className: `tier-chip tier-${m.tier}` }, [m.tier]));
+    modelHint.appendChild(el('span', { className: 'model-hint-text' }, [`${tierHint(m)} · ${m.sizeNote}`]));
+  }
 
   const pagesSlider = el('input', {
     type: 'range', min: '1', max: '10', step: '1',
@@ -153,6 +162,8 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     reviewBtn,
   ]);
   centerInner.appendChild(controls);
+  centerInner.appendChild(modelHint);
+  syncModelHint();
 
   // status
   const statusPhase = el('span', { className: 'status-phase' }, ['']);
@@ -278,6 +289,7 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
         cbs.onSettingsChange(settings);
         modelSelect.value = id;
         modelHelp.textContent = describeModel(id);
+        syncModelHint();
       },
     }) as HTMLSelectElement;
     for (const m of MODEL_REGISTRY) {

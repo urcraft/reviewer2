@@ -43,3 +43,25 @@ export async function renderPdf(
 
   return { totalPages: pdf.numPages, pages, thumbnailUrl };
 }
+
+// Some VLM processors in transformers.js (e.g. Qwen2-VL) only handle a single
+// image — passing N pages makes their image-grid math non-integer. For those
+// models we stitch the pages into one tall image with white separators.
+export function stitchPages(pages: PageImage[], gap = 16): PageImage {
+  if (pages.length === 1) return pages[0];
+  const width = Math.max(...pages.map((p) => p.width));
+  const height = pages.reduce((h, p) => h + p.height, 0) + gap * (pages.length - 1);
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  let y = 0;
+  for (const p of pages) {
+    const copy = new Uint8ClampedArray(p.data);
+    ctx.putImageData(new ImageData(copy, p.width, p.height), 0, y);
+    y += p.height + gap;
+  }
+  const merged = ctx.getImageData(0, 0, width, height);
+  return { data: merged.data, width, height };
+}
+

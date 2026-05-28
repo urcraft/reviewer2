@@ -1,6 +1,6 @@
 import './style.css';
 import { mountUi } from './ui';
-import { renderPdf } from './pdf';
+import { renderPdf, stitchPages } from './pdf';
 import { findModel, type Dtype } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
@@ -180,6 +180,12 @@ async function review(file: File) {
   const dtype: Dtype =
     currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
   const device = chooseDevice();
+
+  // Qwen2-VL's transformers.js processor only handles one image — stitch first.
+  if (entry.singleImage && pages.length > 1) {
+    pages = [stitchPages(pages)];
+    debugBus.info(`pages stitched into 1 image for ${entry.label}`);
+  }
 
   const stream = {
     buffer: '',
