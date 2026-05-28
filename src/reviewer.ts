@@ -23,13 +23,18 @@ export async function runReview(
 
   const images = canvases.map((c) => RawImage.fromCanvas(c));
 
+  // Merge the system instructions into the single user turn — VLM chat templates
+  // are inconsistent about system-role support, and they uniformly require
+  // `content` to be the array form (Jinja iterates over it).
   const messages = [
-    { role: 'system', content: REVIEWER_2_SYSTEM_PROMPT },
     {
       role: 'user',
       content: [
         ...images.map(() => ({ type: 'image' as const })),
-        { type: 'text' as const, text: REVIEWER_2_USER_PROMPT },
+        {
+          type: 'text' as const,
+          text: `${REVIEWER_2_SYSTEM_PROMPT}\n\n---\n\n${REVIEWER_2_USER_PROMPT}`,
+        },
       ],
     },
   ];
