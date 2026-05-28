@@ -1,17 +1,21 @@
 import {
   AutoProcessor,
   AutoModelForImageTextToText,
+  Gemma4ForConditionalGeneration,
   type PreTrainedModel,
   type Processor,
 } from '@huggingface/transformers';
 
 export type Dtype = 'q4' | 'q4f16' | 'q8' | 'fp16' | 'fp32';
 
+export type ModelClassId = 'Gemma4ForConditionalGeneration' | 'AutoModelForImageTextToText';
+
 export type ModelEntry = {
   id: string;
   label: string;
   sizeNote: string;
   multimodal: boolean;
+  modelClass: ModelClassId;
   defaultDtype: Dtype;
   note?: string;
 };
@@ -22,6 +26,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     label: 'Gemma 4 E2B  ·  default',
     sizeNote: '~1.5 GB · q4f16',
     multimodal: true,
+    modelClass: 'Gemma4ForConditionalGeneration',
     defaultDtype: 'q4f16',
     note: 'Google’s smallest Gemma 4. Multimodal. Best balance of quality and size.',
   },
@@ -30,6 +35,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     label: 'Gemma 4 E4B',
     sizeNote: '~2.5 GB · q4f16',
     multimodal: true,
+    modelClass: 'Gemma4ForConditionalGeneration',
     defaultDtype: 'q4f16',
     note: 'Bigger Gemma 4. Sharper roasts, longer download.',
   },
@@ -38,6 +44,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     label: 'SmolVLM 256M  ·  tiny',
     sizeNote: '~300 MB · q4',
     multimodal: true,
+    modelClass: 'AutoModelForImageTextToText',
     defaultDtype: 'q4',
     note: 'Fastest pick. Quality is limited — expect blunter feedback.',
   },
@@ -46,6 +53,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     label: 'SmolVLM2 500M',
     sizeNote: '~600 MB · q4',
     multimodal: true,
+    modelClass: 'AutoModelForImageTextToText',
     defaultDtype: 'q4',
   },
   {
@@ -53,6 +61,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     label: 'Moondream2  ·  visual Q&A',
     sizeNote: '~1.5 GB · q4f16',
     multimodal: true,
+    modelClass: 'AutoModelForImageTextToText',
     defaultDtype: 'q4f16',
   },
   {
@@ -60,6 +69,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     label: 'Qwen2-VL 2B',
     sizeNote: '~2.0 GB · q4f16',
     multimodal: true,
+    modelClass: 'AutoModelForImageTextToText',
     defaultDtype: 'q4f16',
   },
   {
@@ -67,6 +77,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     label: 'Phi-3.5 Vision',
     sizeNote: '~2.5 GB · q4f16',
     multimodal: true,
+    modelClass: 'AutoModelForImageTextToText',
     defaultDtype: 'q4f16',
   },
 ];
@@ -89,6 +100,11 @@ export type ProgressInfo = {
   total?: number;
 };
 
+const MODEL_CLASSES = {
+  Gemma4ForConditionalGeneration,
+  AutoModelForImageTextToText,
+} as const;
+
 export async function loadModel(
   entry: ModelEntry,
   dtype: Dtype,
@@ -98,7 +114,8 @@ export async function loadModel(
     progress_callback: onProgress as never,
   })) as unknown as Processor;
 
-  const model = (await AutoModelForImageTextToText.from_pretrained(entry.id, {
+  const ModelClass = MODEL_CLASSES[entry.modelClass];
+  const model = (await ModelClass.from_pretrained(entry.id, {
     dtype,
     device: 'webgpu',
     progress_callback: onProgress as never,
