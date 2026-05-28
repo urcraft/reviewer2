@@ -1,7 +1,7 @@
 import './style.css';
 import { mountUi } from './ui';
 import { renderPdf } from './pdf';
-import { findModel, loadModel, type LoadedModel, type ProgressInfo } from './models';
+import { findModel, loadModel, type Dtype, type LoadedModel, type ProgressInfo } from './models';
 import { runReview } from './reviewer';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
@@ -11,7 +11,7 @@ if (!app) throw new Error('#app not found');
 
 let currentSettings = loadSettings();
 let loaded: LoadedModel | null = null;
-let loadedDevice: 'webgpu' | 'wasm' | null = null;
+let loadedKey: string | null = null;
 let loadingPromise: Promise<LoadedModel> | null = null;
 
 const ui = mountUi(app, {
@@ -27,7 +27,7 @@ const ui = mountUi(app, {
     saveSettings(s);
     if (reloadNeeded) {
       loaded = null;
-      loadedDevice = null;
+      loadedKey = null;
       loadingPromise = null;
       debugBus.info(`settings: ${s.modelId} (dtype ${s.dtype}, device ${s.device})`);
     }
@@ -35,7 +35,7 @@ const ui = mountUi(app, {
   onClearCache: async () => {
     await clearAllCaches();
     loaded = null;
-    loadedDevice = null;
+    loadedKey = null;
     loadingPromise = null;
     debugBus.info('cache: cleared all model storage');
   },
@@ -53,13 +53,23 @@ function isWebGpuError(err: unknown): boolean {
   return /WebGPU|valid external Instance|compute pipeline|GPUDevice/i.test(msg);
 }
 
-async function ensureModel(deviceOverride?: 'webgpu' | 'wasm'): Promise<LoadedModel> {
-  const device = deviceOverride ?? chooseDevice();
-  if (loaded && loadedDevice === device) return loaded;
-  if (loadingPromise && loadedDevice === device) return loadingPromise;
+function isQ4Dtype(d: string): boolean {
+  return d === 'q4' || d === 'q4f16';
+}
 
+async function ensureModel(
+  deviceOverride?: 'webgpu' | 'wasm',
+  dtypeOverride?: Dtype,
+): Promise<LoadedModel> {
+  const device = deviceOverride ?? chooseDevice();
   const entry = findModel(currentSettings.modelId);
-  const dtype = currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
+  const dtype =
+    dtypeOverride ??
+    (currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype);
+  const cacheKey = `${entry.id}|${dtype}|${device}`;
+  if (loaded && loadedKey === cacheKey) return loaded;
+  if (loadingPromise && loadedKey === cacheKey) return loadingPromise;
+
   debugBus.info(`model: loading ${entry.id} (dtype ${dtype}, device ${device})`);
   ui.setState({
     phase: 'loading-model',
@@ -102,18 +112,18 @@ async function ensureModel(deviceOverride?: 'webgpu' | 'wasm'): Promise<LoadedMo
     }
   };
 
-  loadedDevice = device;
+  loadedKey = cacheKey;
   loadingPromise = (async () => {
     try {
       const m = await loadModel(entry, dtype, device, onProgress);
-      debugBus.info(`model: loaded ${entry.id} on ${device}`);
+      debugBus.info(`model: loaded ${entry.id} on ${device}/${dtype}`);
       loaded = m;
       return m;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       debugBus.error(`model load failed: ${msg}`);
       loadingPromise = null;
-      loadedDevice = null;
+      loadedKey = null;
       throw err;
     }
   })();
@@ -199,26 +209,26 @@ async function review(file: File) {
     });
     return;
   } catch (err) {
-    // Auto-fallback: if WebGPU blew up mid-generation and the user hasn't
-    // pinned a specific device, reload on WASM and retry once.
-    if (
-      currentSettings.device === 'auto' &&
-      loadedDevice === 'webgpu' &&
-      isWebGpuError(err) &&
-      stream.buffer.length === 0
-    ) {
-      debugBus.warn('WebGPU failed; retrying on WASM (CPU)…');
+    // Auto-fallback: if WebGPU blew up and the user hasn't pinned a device,
+    // reload on WASM and retry once. q4/q4f16 use GatherBlockQuantized which
+    // has no CPU kernel, so fall back to q8 in that case.
+    const entry = findModel(currentSettings.modelId);
+    const currentDtype = currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
+    const wgpuFailed = isWebGpuError(err) && stream.buffer.length === 0;
+    if (currentSettings.device === 'auto' && wgpuFailed) {
+      const fallbackDtype: Dtype = isQ4Dtype(currentDtype) ? 'q8' : currentDtype;
+      debugBus.warn(`WebGPU failed; retrying on WASM with dtype ${fallbackDtype}…`);
       loaded = null;
-      loadedDevice = null;
+      loadedKey = null;
       loadingPromise = null;
       ui.setState({
         phase: 'loading-model',
-        phaseLabel: 'WebGPU failed — retrying on CPU…',
+        phaseLabel: `WebGPU failed — retrying on CPU (${fallbackDtype})…`,
         progress: null,
         progressMeta: '',
       });
       try {
-        const wasmModel = await ensureModel('wasm');
+        const wasmModel = await ensureModel('wasm', fallbackDtype);
         ui.setState({
           phase: 'reviewing',
           phaseLabel: 'Roasting on CPU (slower)…',
@@ -235,8 +245,13 @@ async function review(file: File) {
       } catch (err2) {
         ui.setState({
           phase: 'error',
-          phaseLabel: 'Generation failed (CPU fallback also failed).',
-          error: errorMessage(err2, 'Both WebGPU and CPU paths failed. Try a smaller model in settings.'),
+          phaseLabel: 'Both WebGPU and CPU paths failed.',
+          error: errorMessage(
+            err2,
+            `WebGPU error: ${err instanceof Error ? err.message : String(err)}\n\n` +
+              `CPU fallback (${fallbackDtype}) error: see below. ` +
+              `Try a different model in settings — SmolVLM 256M is the most reliable smoke test.`,
+          ),
         });
         return;
       }
