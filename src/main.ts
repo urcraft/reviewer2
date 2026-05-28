@@ -11,7 +11,24 @@ import type { PageImage, WorkerResponse, Device } from './worker-protocol';
 const app = document.getElementById('app');
 if (!app) throw new Error('#app not found');
 
-const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+let worker = spawnWorker();
+// True after any WebGPU/capacity failure — the device may be dead, so the
+// next run respawns the worker from scratch to get a clean GPU context.
+let workerNeedsReset = false;
+
+function spawnWorker(): Worker {
+  const w = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+  w.addEventListener('message', (e: MessageEvent<WorkerResponse>) => onWorkerMessage(e));
+  return w;
+}
+
+function resetWorker(reason: string) {
+  debugBus.warn(`worker reset (${reason}) — fresh WebGPU device`);
+  try { worker.terminate(); } catch { /* ignore */ }
+  worker = spawnWorker();
+  workerNeedsReset = false;
+  pending = {};
+}
 
 let currentSettings = loadSettings();
 
@@ -23,11 +40,19 @@ const ui = mountUi(app, {
     worker.postMessage({ type: 'interrupt' });
   },
   onSettingsChange: (s) => {
+    const modelChanged = s.modelId !== currentSettings.modelId;
     currentSettings = s;
     saveSettings(s);
+    // If we crashed earlier, force a fresh worker on the next run so the new
+    // model doesn't inherit a dead GPU device. Marking instead of resetting
+    // immediately avoids killing an in-progress download.
+    if (modelChanged && workerNeedsReset) {
+      debugBus.info('model changed after failure — worker will be reset on next run');
+    }
   },
   onClearCache: async () => {
     await clearAllCaches();
+    resetWorker('cache cleared');
     debugBus.info('cache: cleared all model storage');
   },
 });
@@ -67,7 +92,7 @@ type Pending = {
 };
 let pending: Pending = {};
 
-worker.addEventListener('message', (e: MessageEvent<WorkerResponse>) => {
+function onWorkerMessage(e: MessageEvent<WorkerResponse>) {
   const msg = e.data;
   switch (msg.type) {
     case 'log':
@@ -96,7 +121,7 @@ worker.addEventListener('message', (e: MessageEvent<WorkerResponse>) => {
       break;
     }
   }
-});
+}
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -204,6 +229,9 @@ function runGeneration(
 // ---- main flow --------------------------------------------------------------
 
 async function review(file: File) {
+  // A previous WebGPU crash leaves the device in a dead state for the
+  // lifetime of the worker — so respawn before doing anything else.
+  if (workerNeedsReset) resetWorker('previous WebGPU failure');
   pending = {};
   debugBus.resetRaw();
   ui.setState({
@@ -293,6 +321,7 @@ async function review(file: File) {
 
   function showFailure(err: unknown, entry: ModelEntry) {
     const raw = err instanceof Error ? err.message : String(err);
+    if (isWebGpuish(err) || isCapacityError(raw)) workerNeedsReset = true;
     if (isCapacityError(raw)) {
       ui.setState({ phase: 'error', phaseLabel: 'Out of memory.', error: capacityMessage(entry, raw) });
     } else {
@@ -317,6 +346,9 @@ async function review(file: File) {
     if (eligibleForWasm) {
       const fb: Dtype = isQ4Dtype(dtype) ? 'q8' : dtype;
       debugBus.warn(`WebGPU failed; retrying on CPU (${fb})…`);
+      // Respawn before the CPU retry — the WebGPU device is dead and any
+      // shared ORT state in the worker may be in a bad mood.
+      resetWorker('WebGPU failure before CPU retry');
       ui.setState({
         phase: 'loading-model',
         phaseLabel: `WebGPU failed — retrying on CPU (${fb})…`,
@@ -335,6 +367,7 @@ async function review(file: File) {
     // on a single oversized buffer. Skip it and tell the user what to do.
     if (isWebGpuish(err) && !canFallBackToWasm(entry) && stream.buffer.length === 0) {
       debugBus.warn(`${entry.label} failed on WebGPU and is too large for a CPU retry.`);
+      workerNeedsReset = true;
       ui.setState({
         phase: 'error',
         phaseLabel: 'Out of memory.',

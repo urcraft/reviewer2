@@ -49,7 +49,22 @@ async function handleLoad({ modelId, dtype, device }: LoadRequest) {
     post({ type: 'loaded' });
     return;
   }
-  loaded = null;
+
+  // Dispose the previous model so its ORT sessions + GPU buffers are released
+  // before we allocate the next one. Otherwise the old weights linger in VRAM
+  // and the next load fights for the leftover budget.
+  if (loaded) {
+    try {
+      const prev = loaded.model as { dispose?: () => Promise<void> | void };
+      if (typeof prev.dispose === 'function') {
+        await prev.dispose();
+        log('info', 'previous model disposed');
+      }
+    } catch (e) {
+      log('warn', `dispose failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    loaded = null;
+  }
 
   log('info', `model: loading ${modelId} (dtype ${dtype}, device ${device})`);
 
