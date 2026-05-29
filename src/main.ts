@@ -1,7 +1,8 @@
 import './style.css';
 import { mountUi } from './ui';
-import { renderPdf, stitchPages } from './pdf';
+import { renderPdf, stitchPages, pageImageToDataUrl } from './pdf';
 import { findModel, type Dtype, type ModelEntry } from './model-registry';
+import { runOpenRouter } from './openrouter';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
 import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT, REVIEWER_2_PREFILL } from './prompts';
@@ -32,12 +33,20 @@ function resetWorker(reason: string) {
 
 let currentSettings = loadSettings();
 
+// Active OpenRouter request, so Stop can abort the fetch (the worker isn't
+// involved on the cloud path).
+let currentAbort: AbortController | null = null;
+
 const ui = mountUi(app, {
   onPickFile: (file) => {
     void review(file);
   },
   onStop: () => {
-    worker.postMessage({ type: 'interrupt' });
+    if (currentSettings.provider === 'openrouter') {
+      currentAbort?.abort();
+    } else {
+      worker.postMessage({ type: 'interrupt' });
+    }
   },
   onSettingsChange: (s) => {
     const modelChanged = s.modelId !== currentSettings.modelId;
@@ -176,6 +185,30 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+// Token sink shared by the local (worker) and cloud (OpenRouter) paths: appends
+// each chunk to the review buffer, tracks tok/s, and pushes it into the UI.
+function createStream() {
+  const stream = {
+    buffer: '',
+    tokens: 0,
+    start: 0,
+    onToken(chunk: string) {
+      if (stream.start === 0) stream.start = performance.now();
+      stream.buffer += chunk;
+      stream.tokens += 1;
+      debugBus.appendRaw(chunk);
+      const elapsedMs = performance.now() - stream.start;
+      ui.setState({
+        reviewMarkdown: stream.buffer,
+        tokens: stream.tokens,
+        elapsedMs,
+        progressMeta: `${stream.tokens} tok · ${(stream.tokens / (elapsedMs / 1000)).toFixed(1)} tok/s`,
+      });
+    },
+  };
+  return stream;
+}
+
 function ensureModel(device: Device, dtype: Dtype): Promise<void> {
   const entry = findModel(currentSettings.modelId);
   ui.setState({
@@ -261,6 +294,12 @@ async function review(file: File) {
     return;
   }
 
+  // Cloud path: stream from OpenRouter and skip the worker / GPU entirely.
+  if (currentSettings.provider === 'openrouter') {
+    await reviewWithOpenRouter(pages);
+    return;
+  }
+
   const entry = findModel(currentSettings.modelId);
   const dtype: Dtype =
     currentSettings.dtype === 'default' ? entry.defaultDtype : currentSettings.dtype;
@@ -284,24 +323,7 @@ async function review(file: File) {
     debugBus.info(`pages stitched into 1 image for ${entry.label}`);
   }
 
-  const stream = {
-    buffer: '',
-    tokens: 0,
-    start: 0,
-    onToken(chunk: string) {
-      if (stream.start === 0) stream.start = performance.now();
-      stream.buffer += chunk;
-      stream.tokens += 1;
-      debugBus.appendRaw(chunk);
-      const elapsedMs = performance.now() - stream.start;
-      ui.setState({
-        reviewMarkdown: stream.buffer,
-        tokens: stream.tokens,
-        elapsedMs,
-        progressMeta: `${stream.tokens} tok · ${(stream.tokens / (elapsedMs / 1000)).toFixed(1)} tok/s`,
-      });
-    },
-  };
+  const stream = createStream();
 
   // One full attempt on a device: load → generate → mark done.
   async function attempt(dev: Device, dt: Dtype) {
@@ -378,6 +400,59 @@ async function review(file: File) {
     }
 
     showFailure(err, entry);
+  }
+}
+
+// Cloud review via OpenRouter: encode pages to data URLs and stream the reply.
+// No worker, GPU probe, capacity logic, or stitching — the hosted model takes the
+// pages as separate image parts.
+async function reviewWithOpenRouter(pages: PageImage[]) {
+  if (!currentSettings.openrouterApiKey) {
+    ui.setState({
+      phase: 'error',
+      phaseLabel: 'No API key.',
+      error: 'Cloud mode needs an OpenRouter API key. Open settings (⚙) to paste one — get a free key at https://openrouter.ai/keys.',
+    });
+    return;
+  }
+
+  ui.setState({
+    phase: 'reviewing',
+    phaseLabel: 'Roasting via OpenRouter…',
+    progress: null,
+    progressMeta: '',
+  });
+
+  const imageDataUrls = pages.map((p) => pageImageToDataUrl(p));
+  debugBus.info(`openrouter: ${imageDataUrls.length} page image(s) · model ${currentSettings.openrouterModelId}`);
+
+  const stream = createStream();
+  currentAbort = new AbortController();
+  try {
+    const r = await runOpenRouter({
+      apiKey: currentSettings.openrouterApiKey,
+      model: currentSettings.openrouterModelId,
+      systemPrompt: REVIEWER_2_SYSTEM_PROMPT,
+      userPrompt: REVIEWER_2_USER_PROMPT,
+      imageDataUrls,
+      signal: currentAbort.signal,
+      onToken: stream.onToken,
+    });
+    debugBus.info(`openrouter: ${r.interrupted ? 'stopped' : 'done'} · ${r.tokens} chunk(s) · ${(r.elapsedMs / 1000).toFixed(1)}s`);
+    ui.setState({
+      phase: 'done',
+      phaseLabel: r.interrupted ? 'Stopped.' : 'Done. The verdict is in. (cloud)',
+      progress: 1,
+    });
+  } catch (err) {
+    debugBus.error(`openrouter failed: ${err instanceof Error ? err.message : String(err)}`);
+    ui.setState({
+      phase: 'error',
+      phaseLabel: 'Cloud request failed.',
+      error: errorMessage(err, 'OpenRouter request failed.'),
+    });
+  } finally {
+    currentAbort = null;
   }
 }
 

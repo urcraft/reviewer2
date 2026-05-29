@@ -1,4 +1,13 @@
-import { MODEL_REGISTRY, findModel, tierHint, type Dtype } from './model-registry';
+import {
+  MODEL_REGISTRY,
+  findModel,
+  tierHint,
+  isCloudModelId,
+  OPENROUTER_MODEL_ID,
+  OPENROUTER_LABEL,
+  OPENROUTER_NOTE,
+  type Dtype,
+} from './model-registry';
 import { estimateLargestBufferBytes, formatGB, type GpuInfo } from './gpu-info';
 import { loadSettings, saveSettings, type Settings, type Device } from './settings';
 import { debugBus, formatEvents } from './debug';
@@ -33,7 +42,39 @@ export type Ui = {
   el: { reviewBody: HTMLElement };
 };
 
+const GET_KEY_URL = 'https://openrouter.ai/keys';
+
 const DTYPE_OPTIONS: Array<Dtype | 'default'> = ['default', 'q4', 'q4f16', 'q8', 'fp16'];
+
+// The dropdown value that represents the current source: the cloud router id when
+// in OpenRouter mode, otherwise the selected local model id.
+function currentModelValue(s: Settings): string {
+  return s.provider === 'openrouter' ? OPENROUTER_MODEL_ID : s.modelId;
+}
+
+// Populate a <select> with a Cloud optgroup (the single OpenRouter router) and a
+// Local optgroup (the in-browser models). `withSize` appends the size note, which
+// the settings drawer shows but the compact header pill does not.
+function populateModelSelect(select: HTMLSelectElement, withSize: boolean) {
+  select.innerHTML = '';
+  const cloud = document.createElement('optgroup');
+  cloud.label = 'Cloud';
+  const cloudOpt = document.createElement('option');
+  cloudOpt.value = OPENROUTER_MODEL_ID;
+  cloudOpt.textContent = OPENROUTER_LABEL;
+  cloud.appendChild(cloudOpt);
+  select.appendChild(cloud);
+
+  const local = document.createElement('optgroup');
+  local.label = 'Local (in-browser)';
+  for (const m of MODEL_REGISTRY) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = withSize ? `${m.label}  (${m.sizeNote})` : m.label;
+    local.appendChild(opt);
+  }
+  select.appendChild(local);
+}
 const DEVICE_OPTIONS: Array<{ value: Device; label: string }> = [
   { value: 'auto', label: 'auto (WebGPU with CPU fallback)' },
   { value: 'webgpu', label: 'WebGPU only' },
@@ -104,31 +145,48 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
   const uploadSlot = el('div');
   centerInner.appendChild(uploadSlot);
 
+  // Apply a model-dropdown selection to settings: the cloud router flips us into
+  // OpenRouter mode; any other value is a local model. Used by both dropdowns.
+  function selectModel(id: string) {
+    if (isCloudModelId(id)) {
+      settings = { ...settings, provider: 'openrouter', openrouterModelId: id };
+    } else {
+      settings = { ...settings, provider: 'local', modelId: id, dtype: 'default' };
+    }
+    saveSettings(settings);
+    cbs.onSettingsChange(settings);
+  }
+
   // controls
   const modelSelect = el('select', {
     className: 'pill-select',
     title: 'Model',
     onchange: (e: Event) => {
-      const id = (e.target as HTMLSelectElement).value;
-      settings = { ...settings, modelId: id, dtype: 'default' };
-      saveSettings(settings);
-      cbs.onSettingsChange(settings);
+      selectModel((e.target as HTMLSelectElement).value);
       syncModelHint();
     },
   }) as HTMLSelectElement;
-  for (const m of MODEL_REGISTRY) {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.label;
-    modelSelect.appendChild(opt);
-  }
-  modelSelect.value = settings.modelId;
+  populateModelSelect(modelSelect, false);
+  modelSelect.value = currentModelValue(settings);
 
   const modelHint = el('div', { className: 'model-hint' });
   let gpuInfo: GpuInfo | null = null;
   function syncModelHint() {
-    const m = findModel(settings.modelId);
     modelHint.innerHTML = '';
+    // Cloud: no GPU/capacity story — show a cloud chip and nudge for a key.
+    if (settings.provider === 'openrouter') {
+      modelHint.appendChild(el('span', { className: 'tier-chip cloud-chip' }, ['cloud']));
+      modelHint.appendChild(
+        el('span', { className: 'model-hint-text' }, ['free via OpenRouter · pages are sent to OpenRouter']),
+      );
+      if (!settings.openrouterApiKey) {
+        modelHint.appendChild(
+          el('span', { className: 'capacity-warn', title: 'No API key set' }, ['⚠ add your API key in settings']),
+        );
+      }
+      return;
+    }
+    const m = findModel(settings.modelId);
     modelHint.appendChild(el('span', { className: `tier-chip tier-${m.tier}` }, [m.tier]));
     modelHint.appendChild(el('span', { className: 'model-hint-text' }, [`${tierHint(m)} · ${m.sizeNote}`]));
     // Capacity warning: estimate the largest buffer the model will ask the GPU
@@ -170,6 +228,9 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     onclick: () => {
       if (isBusy()) {
         cbs.onStop();
+      } else if (settings.provider === 'openrouter' && !settings.openrouterApiKey) {
+        // Cloud mode with no key — funnel to settings instead of failing the run.
+        openDrawer();
       } else if (currentFile) {
         cbs.onPickFile(currentFile);
       }
@@ -300,26 +361,149 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     drawer.root.classList.remove('open');
   }
 
+  // ---------- first-run modal ----------
+  // Lets a new user pick Local vs Cloud (and paste a key). Dismissable: closing
+  // without choosing leaves provider = local. Shown on mount when !onboarded.
+  const modalScrim = el('div', { className: 'scrim' });
+  const modal = buildModal();
+  document.body.appendChild(modalScrim);
+  document.body.appendChild(modal.root);
+  modalScrim.addEventListener('click', () => modal.dismiss());
+
+  function closeModal() {
+    modalScrim.classList.remove('open');
+    modal.root.classList.remove('open');
+  }
+
+  // Persist a first-run choice and reflect it across the UI.
+  function commitOnboarding(patch: Partial<Settings>) {
+    settings = { ...settings, ...patch, onboarded: true };
+    saveSettings(settings);
+    cbs.onSettingsChange(settings);
+    modelSelect.value = currentModelValue(settings);
+    syncModelHint();
+    render();
+    closeModal();
+  }
+
+  function buildModal() {
+    const keyInput = el('input', {
+      type: 'password',
+      className: 'field-input',
+      placeholder: 'sk-or-v1-…',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      oninput: () => { startBtn.disabled = keyInput.value.trim().length === 0; },
+    }) as HTMLInputElement;
+
+    const startBtn = el('button', {
+      className: 'btn-primary',
+      onclick: () => commitOnboarding({ provider: 'openrouter', openrouterApiKey: keyInput.value.trim() }),
+    }, ['Save key & start']) as HTMLButtonElement;
+    startBtn.disabled = true;
+
+    const cloudPanel = el('div', { className: 'modal-cloud' }, [
+      el('label', { className: 'field-label' }, ['OpenRouter API key']),
+      keyInput,
+      el('div', { className: 'field-help' }, [
+        'Free models, no credit card. ',
+        el('a', { href: GET_KEY_URL, target: '_blank', rel: 'noopener' }, ['Get a free key →']),
+        ' Stored only in this browser; your PDF pages are sent to OpenRouter.',
+      ]),
+      startBtn,
+    ]);
+    cloudPanel.style.display = 'none';
+
+    const localBtn = el('button', {
+      className: 'modal-choice',
+      onclick: () => commitOnboarding({ provider: 'local' }),
+    }, [
+      el('div', { className: 'modal-choice-title' }, ['🖥  Run locally']),
+      el('div', { className: 'modal-choice-sub' }, [
+        'Private — the model runs in your browser, nothing leaves your machine. Downloads 0.6–2.5 GB of weights; needs a decent GPU.',
+      ]),
+    ]);
+
+    const cloudBtn = el('button', {
+      className: 'modal-choice',
+      onclick: () => {
+        cloudBtn.classList.add('selected');
+        localBtn.classList.remove('selected');
+        cloudPanel.style.display = '';
+        keyInput.focus();
+      },
+    }, [
+      el('div', { className: 'modal-choice-title' }, ['☁  Use OpenRouter (cloud)']),
+      el('div', { className: 'modal-choice-sub' }, [
+        'No download — just paste a free API key. Pages are sent to OpenRouter for the review.',
+      ]),
+    ]);
+
+    const root = el('div', {
+      className: 'modal',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': 'Choose how to run Reviewer 2',
+    }, [
+      el('div', { className: 'drawer-header' }, [
+        el('div', { className: 'drawer-title' }, ['How do you want to run it?']),
+        el('button', { className: 'icon-btn', onclick: () => modalAPI.dismiss(), 'aria-label': 'Close' }, ['×']),
+      ]),
+      el('div', { className: 'modal-body' }, [localBtn, cloudBtn, cloudPanel]),
+    ]);
+
+    const modalAPI = {
+      root,
+      // Closing without choosing keeps the default (local) but won't nag again.
+      dismiss: () => commitOnboarding({}),
+    };
+    return modalAPI;
+  }
+
+  function openModal() {
+    modalScrim.classList.add('open');
+    modal.root.classList.add('open');
+  }
+
   function buildDrawer() {
     const modelSel = el('select', {
       className: 'field-select',
       onchange: (e: Event) => {
-        const id = (e.target as HTMLSelectElement).value;
-        settings = { ...settings, modelId: id, dtype: 'default' };
-        saveSettings(settings);
-        cbs.onSettingsChange(settings);
-        modelSelect.value = id;
-        modelHelp.textContent = describeModel(id);
+        selectModel((e.target as HTMLSelectElement).value);
+        modelSelect.value = currentModelValue(settings);
+        modelHelp.textContent = describeModel(settings);
         syncModelHint();
+        syncDrawerFields();
       },
     }) as HTMLSelectElement;
-    for (const m of MODEL_REGISTRY) {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = `${m.label}  (${m.sizeNote})`;
-      modelSel.appendChild(opt);
-    }
-    const modelHelp = el('div', { className: 'field-help' }, [describeModel(settings.modelId)]);
+    populateModelSelect(modelSel, true);
+    const modelHelp = el('div', { className: 'field-help' }, [describeModel(settings)]);
+
+    // OpenRouter API key — only relevant in cloud mode, so the whole field hides
+    // when a local model is selected. Stored only in this browser's localStorage.
+    const apiKeyIn = el('input', {
+      type: 'password',
+      className: 'field-input',
+      placeholder: 'sk-or-v1-…',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      value: settings.openrouterApiKey,
+      oninput: (e: Event) => {
+        settings = { ...settings, openrouterApiKey: (e.target as HTMLInputElement).value.trim() };
+        saveSettings(settings);
+        cbs.onSettingsChange(settings);
+        syncModelHint();
+      },
+    }) as HTMLInputElement;
+    const apiKeyField = el('div', { className: 'field' }, [
+      el('label', { className: 'field-label' }, ['OpenRouter API key']),
+      apiKeyIn,
+      el('div', { className: 'field-help' }, [
+        'Free models — just need a key. ',
+        el('a', { href: GET_KEY_URL, target: '_blank', rel: 'noopener' }, ['Get a free key →']),
+        ' Stored only in this browser; your PDF pages are sent to OpenRouter.',
+      ]),
+    ]);
 
     const pagesIn = el('input', {
       type: 'range', min: '1', max: '10', step: '1',
@@ -378,12 +562,43 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       },
     }, ['Clear cached models']);
 
+    // dtype / device / cache only matter for local models — hide them in cloud mode.
+    const dtypeField = el('div', { className: 'field' }, [
+      el('label', { className: 'field-label' }, ['Precision (dtype)']),
+      dtypeSel,
+      el('div', { className: 'field-help' }, [
+        'Lower precision = smaller download + faster, but rougher output. Stick with the model default unless you know what you want.',
+      ]),
+    ]);
+    const deviceField = el('div', { className: 'field' }, [
+      el('label', { className: 'field-label' }, ['Device']),
+      deviceSel,
+      el('div', { className: 'field-help' }, [
+        'WebGPU is much faster but some browsers / models hit driver bugs (look for "compute pipeline" errors). Auto falls back to CPU if WebGPU blows up mid-generation.',
+      ]),
+    ]);
+    const cacheField = el('div', { className: 'field' }, [
+      el('label', { className: 'field-label' }, ['Cache']),
+      clearBtn,
+      el('div', { className: 'field-help' }, [
+        'Models live in IndexedDB after first download. Clear if you want to free space or force a re-download.',
+      ]),
+    ]);
+
+    // Extend syncApiKeyField to toggle the local-only fields too.
+    const syncDrawerFields = () => {
+      const cloud = settings.provider === 'openrouter';
+      apiKeyField.style.display = cloud ? '' : 'none';
+      for (const f of [dtypeField, deviceField, cacheField]) f.style.display = cloud ? 'none' : '';
+    };
+
     const body = el('div', { className: 'drawer-body' }, [
       el('div', { className: 'field' }, [
         el('label', { className: 'field-label' }, ['Model']),
         modelSel,
         modelHelp,
       ]),
+      apiKeyField,
       el('div', { className: 'field' }, [
         el('label', { className: 'field-label' }, ['Pages to send']),
         el('div', { className: 'field-row' }, [pagesIn, pagesValD]),
@@ -391,27 +606,9 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
           'Tiny models work best with fewer pages. Title + abstract + intro is usually enough for a roast.',
         ]),
       ]),
-      el('div', { className: 'field' }, [
-        el('label', { className: 'field-label' }, ['Precision (dtype)']),
-        dtypeSel,
-        el('div', { className: 'field-help' }, [
-          'Lower precision = smaller download + faster, but rougher output. Stick with the model default unless you know what you want.',
-        ]),
-      ]),
-      el('div', { className: 'field' }, [
-        el('label', { className: 'field-label' }, ['Device']),
-        deviceSel,
-        el('div', { className: 'field-help' }, [
-          'WebGPU is much faster but some browsers / models hit driver bugs (look for "compute pipeline" errors). Auto falls back to CPU if WebGPU blows up mid-generation.',
-        ]),
-      ]),
-      el('div', { className: 'field' }, [
-        el('label', { className: 'field-label' }, ['Cache']),
-        clearBtn,
-        el('div', { className: 'field-help' }, [
-          'Models live in IndexedDB after first download. Clear if you want to free space or force a re-download.',
-        ]),
-      ]),
+      dtypeField,
+      deviceField,
+      cacheField,
     ]);
 
     const root = el('div', {
@@ -428,12 +625,14 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     ]);
 
     function refresh() {
-      modelSel.value = settings.modelId;
+      modelSel.value = currentModelValue(settings);
+      apiKeyIn.value = settings.openrouterApiKey;
       pagesIn.value = String(settings.maxPages);
       pagesValD.textContent = String(settings.maxPages);
       dtypeSel.value = settings.dtype;
       deviceSel.value = settings.device;
-      modelHelp.textContent = describeModel(settings.modelId);
+      modelHelp.textContent = describeModel(settings);
+      syncDrawerFields();
     }
 
     return { root, refresh };
@@ -575,6 +774,8 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     saveSettings(settings);
     render();
   }
+  // First run: ask Local vs Cloud.
+  if (!settings.onboarded) openModal();
 
   function setGpuInfo(info: GpuInfo) {
     gpuInfo = info;
@@ -590,8 +791,9 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
   };
 }
 
-function describeModel(id: string): string {
-  const m = findModel(id);
+function describeModel(s: Settings): string {
+  if (s.provider === 'openrouter') return OPENROUTER_NOTE;
+  const m = findModel(s.modelId);
   return [m.note, m.sizeNote].filter(Boolean).join(' · ');
 }
 
