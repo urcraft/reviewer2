@@ -685,3 +685,73 @@ button:focus-visible, .dropzone:focus-visible, select:focus-visible, input:focus
   border-top: 1px solid var(--border);
 }
 .footer a { color: var(--text-dim); }
+
+/* ------------------------------------------------------------------ */
+/* OpenRouter / cloud                                                  */
+/* ------------------------------------------------------------------ */
+
+.cloud-chip {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* Text inputs in the drawer + modal (e.g. the API key field). */
+.field-input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+}
+.field-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* First-run modal — centered dialog over the shared .scrim. */
+.modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -48%);
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  z-index: 60;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms, transform 200ms;
+}
+.modal.open { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%); }
+
+.modal-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+
+.modal-choice {
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  cursor: pointer;
+  color: var(--text);
+  transition: border-color 150ms, background 150ms;
+}
+.modal-choice:hover { border-color: var(--border-strong); }
+.modal-choice.selected { border-color: var(--accent); }
+.modal-choice-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.modal-choice-sub { color: var(--text-faint); font-size: 12px; line-height: 1.45; }
+
+.modal-cloud {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.modal-cloud .btn-primary { align-self: flex-start; }

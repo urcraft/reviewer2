@@ -44,6 +44,19 @@ export async function renderPdf(
   return { totalPages: pdf.numPages, pages, thumbnailUrl };
 }
 
+// Encode a rendered page (RGBA buffer) as a base64 JPEG data URL for OpenRouter's
+// `image_url` content parts. JPEG keeps the request payload small; quality 0.8 is
+// plenty for text-heavy pages. A copy is taken because ImageData needs a backing
+// buffer it owns.
+export function pageImageToDataUrl(p: PageImage, quality = 0.8): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = p.width;
+  canvas.height = p.height;
+  const ctx = canvas.getContext('2d')!;
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(p.data), p.width, p.height), 0, 0);
+  return canvas.toDataURL('image/jpeg', quality);
+}
+
 // Some VLM processors in transformers.js (e.g. Qwen2-VL) only handle a single
 // image — passing N pages makes their image-grid math non-integer. For those
 // models we stitch the pages into one tall image with white separators.

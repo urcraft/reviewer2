@@ -114,6 +114,19 @@ export function findModel(id: string): ModelEntry {
   return MODEL_REGISTRY.find((m) => m.id === id) ?? MODEL_REGISTRY[0];
 }
 
+// ---- OpenRouter (cloud) ------------------------------------------------------
+// A single hosted option: the free-models router. It auto-selects a free model
+// per request and filters for the features we need (image understanding), so the
+// user only has to supply an API key — no model management, no download.
+export const OPENROUTER_MODEL_ID = 'openrouter/free';
+export const OPENROUTER_LABEL = 'OpenRouter · free models (cloud)';
+export const OPENROUTER_NOTE =
+  'Runs in the cloud via OpenRouter. Free tier — just paste an API key. Your PDF pages are sent to OpenRouter, not kept in your browser.';
+
+export function isCloudModelId(id: string): boolean {
+  return id === OPENROUTER_MODEL_ID;
+}
+
 const TIER_LABEL: Record<Tier, string> = {
   tiny: 'weak at the persona — mostly describes',
   small: 'okay — some snark',
