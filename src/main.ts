@@ -4,7 +4,7 @@ import { renderPdf, stitchPages } from './pdf';
 import { findModel, type Dtype, type ModelEntry } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
-import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT } from './prompts';
+import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT, REVIEWER_2_PREFILL } from './prompts';
 import { probeGpu, estimateLargestBufferBytes, formatGB, type GpuInfo } from './gpu-info';
 import type { PageImage, WorkerResponse, Device } from './worker-protocol';
 
@@ -221,6 +221,7 @@ function runGeneration(
       images,
       systemPrompt: REVIEWER_2_SYSTEM_PROMPT,
       userPrompt: REVIEWER_2_USER_PROMPT,
+      prefill: REVIEWER_2_PREFILL,
       maxNewTokens,
     });
   });

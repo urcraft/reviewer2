@@ -21,6 +21,8 @@ export type GenerateRequest = {
   images: PageImage[];
   systemPrompt: string;
   userPrompt: string;
+  // Text to seed the assistant's reply with (anti-refusal prefill). May be empty.
+  prefill: string;
   maxNewTokens: number;
 };
 

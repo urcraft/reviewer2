@@ -138,7 +138,10 @@ async function handleGenerate(req: GenerateRequest) {
       tokenizer: unknown;
     };
     log('info', `processor: apply_chat_template (${images.length} image(s))`);
-    const text = proc.apply_chat_template(messages, { add_generation_prompt: true });
+    // Seed the assistant turn with the prefill so safety-tuned models continue the
+    // review instead of refusing. apply_chat_template(add_generation_prompt) ends
+    // right at the model's turn, so appending the prefill string is a valid prefill.
+    const text = proc.apply_chat_template(messages, { add_generation_prompt: true }) + req.prefill;
 
     log('info', 'processor: encoding text + images');
     // Processor _call signature differs by model family: Gemma/SmolVLM/Qwen are
@@ -180,6 +183,10 @@ async function handleGenerate(req: GenerateRequest) {
         post({ type: 'token', text: chunk });
       },
     });
+
+    // The streamer skips the prompt (and thus the prefill), so surface it ourselves
+    // — otherwise the rendered review would start mid-sentence after the prefill.
+    if (req.prefill) post({ type: 'token', text: req.prefill });
 
     log('info', 'generate: starting');
     await (model as { generate: (a: Record<string, unknown>) => Promise<unknown> }).generate({
