@@ -47,16 +47,6 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     note: 'Bigger Gemma 4. Sharpest roasts here, longest download.',
   },
   {
-    id: 'onnx-community/Phi-3.5-vision-instruct',
-    label: 'Phi-3.5 Vision',
-    sizeNote: '~2.5 GB · q4f16',
-    multimodal: true,
-    modelClass: 'AutoModelForImageTextToText',
-    defaultDtype: 'q4f16',
-    tier: 'mid',
-    note: 'Detailed, follows structure well. Largest download.',
-  },
-  {
     id: 'Xenova/moondream2',
     label: 'Moondream2  ·  visual Q&A',
     sizeNote: '~1.5 GB · q4f16',
