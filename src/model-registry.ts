@@ -47,17 +47,6 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     note: 'Bigger Gemma 4. Sharpest roasts here, longest download.',
   },
   {
-    id: 'onnx-community/Qwen2-VL-2B-Instruct',
-    label: 'Qwen2-VL 2B',
-    sizeNote: '~2.0 GB · q4f16',
-    multimodal: true,
-    modelClass: 'AutoModelForImageTextToText',
-    defaultDtype: 'q4f16',
-    tier: 'mid',
-    note: 'Strong instruction-follower. Pages are stitched into one image for this model.',
-    singleImage: true,
-  },
-  {
     id: 'onnx-community/Phi-3.5-vision-instruct',
     label: 'Phi-3.5 Vision',
     sizeNote: '~2.5 GB · q4f16',
