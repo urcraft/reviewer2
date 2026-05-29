@@ -18,5 +18,5 @@ async function run(modelId: string, label: string) {
   await b.close();
 }
 
-await run('onnx-community/Qwen2-VL-2B-Instruct', 'Qwen2-VL (expect stitched=true)');
+// No registry model currently sets singleImage, so nothing should stitch.
 await run('onnx-community/gemma-4-E2B-it-ONNX', 'Gemma4   (expect stitched=false)');

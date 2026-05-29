@@ -348,7 +348,7 @@ async function review(file: File) {
     );
   }
 
-  // Qwen2-VL's transformers.js processor only handles one image — stitch first.
+  // Some processors only handle one image (registry singleImage) — stitch first.
   if (entry.singleImage && pages.length > 1) {
     pages = [stitchPages(pages, 16, stitchCap)];
     debugBus.info(`pages stitched into 1 image for ${entry.label}`);

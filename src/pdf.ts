@@ -57,9 +57,10 @@ export function pageImageToDataUrl(p: PageImage, quality = 0.8): string {
   return canvas.toDataURL('image/jpeg', quality);
 }
 
-// Some VLM processors in transformers.js (e.g. Qwen2-VL) only handle a single
-// image — passing N pages makes their image-grid math non-integer. For those
-// models we stitch the pages into one tall image with white separators.
+// Some VLM processors in transformers.js only handle a single image — passing
+// N pages makes their image-grid math non-integer. For those models (flagged
+// singleImage in the registry) we stitch the pages into one tall image with
+// white separators.
 // maxPixels caps the stitched image so a tall multi-page composite doesn't
 // blow up the vision encoder's activation memory (a common WebGPU OOM cause).
 export function stitchPages(pages: PageImage[], gap = 16, maxPixels = 2_000_000): PageImage {

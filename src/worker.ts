@@ -144,7 +144,7 @@ async function handleGenerate(req: GenerateRequest) {
     const text = proc.apply_chat_template(messages, { add_generation_prompt: true }) + req.prefill;
 
     log('info', 'processor: encoding text + images');
-    // Processor _call signature differs by model family: Gemma/SmolVLM/Qwen are
+    // Processor _call signature differs by model family: Gemma/SmolVLM are
     // (text, images); the Llava family (LFM2-VL, Moondream) is (images, text).
     // The registry flags the known reversed models; if an unflagged model throws
     // a structural error here we flip the order once and retry (param names are
