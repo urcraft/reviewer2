@@ -11,7 +11,7 @@ import {
 import { estimateLargestBufferBytes, formatGB, type GpuInfo } from './gpu-info';
 import { fetchFreeModels } from './openrouter';
 import { loadSettings, saveSettings, type Settings, type Device } from './settings';
-import { PROMPT_VARIANTS, findPromptVariant } from './prompts';
+import { PROMPT_VARIANTS } from './prompts';
 import { debugBus, formatEvents } from './debug';
 import { renderMarkdown } from './markdown';
 
@@ -171,6 +171,25 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
   populateModelSelect(modelSelect, false);
   modelSelect.value = currentModelValue(settings);
 
+  // Review persona / tone — mirrors the Model pill. Kept in sync with the
+  // drawer copy via refreshStyleSelect().
+  const styleSelect = el('select', {
+    className: 'pill-select',
+    title: 'Review style',
+    onchange: (e: Event) => {
+      settings = { ...settings, promptVariant: (e.target as HTMLSelectElement).value };
+      saveSettings(settings);
+      cbs.onSettingsChange(settings);
+    },
+  }) as HTMLSelectElement;
+  for (const v of PROMPT_VARIANTS) {
+    const opt = document.createElement('option');
+    opt.value = v.id;
+    opt.textContent = v.label;
+    styleSelect.appendChild(opt);
+  }
+  styleSelect.value = settings.promptVariant;
+
   const modelHint = el('div', { className: 'model-hint' });
   let gpuInfo: GpuInfo | null = null;
   function syncModelHint() {
@@ -243,6 +262,7 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
 
   const controls = el('div', { className: 'controls' }, [
     el('div', { className: 'control' }, [el('span', null, ['Model']), modelSelect]),
+    el('div', { className: 'control' }, [el('span', null, ['Style']), styleSelect]),
     el('div', { className: 'control' }, [el('span', null, ['Pages']), pagesSlider, pagesVal]),
     reviewBtn,
   ]);
@@ -609,31 +629,6 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       }
     }
 
-    // Persona / tone of the review. Applies to both local and cloud runs.
-    const promptSel = el('select', {
-      className: 'field-select',
-      onchange: (e: Event) => {
-        settings = { ...settings, promptVariant: (e.target as HTMLSelectElement).value };
-        saveSettings(settings);
-        cbs.onSettingsChange(settings);
-        promptHelp.textContent = findPromptVariant(settings.promptVariant).description;
-      },
-    }) as HTMLSelectElement;
-    for (const v of PROMPT_VARIANTS) {
-      const opt = document.createElement('option');
-      opt.value = v.id;
-      opt.textContent = v.label;
-      promptSel.appendChild(opt);
-    }
-    const promptHelp = el('div', { className: 'field-help' }, [
-      findPromptVariant(settings.promptVariant).description,
-    ]);
-    const promptField = el('div', { className: 'field' }, [
-      el('label', { className: 'field-label' }, ['Review style']),
-      promptSel,
-      promptHelp,
-    ]);
-
     const pagesIn = el('input', {
       type: 'range', min: '1', max: '10', step: '1',
       className: 'slider',
@@ -731,7 +726,6 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       ]),
       apiKeyField,
       modelIdField,
-      promptField,
       el('div', { className: 'field' }, [
         el('label', { className: 'field-label' }, ['Pages to send']),
         el('div', { className: 'field-row' }, [pagesIn, pagesValD]),
@@ -761,8 +755,6 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       modelSel.value = currentModelValue(settings);
       apiKeyIn.value = settings.openrouterApiKey;
       rebuildModelOptions(cachedModels);
-      promptSel.value = settings.promptVariant;
-      promptHelp.textContent = findPromptVariant(settings.promptVariant).description;
       pagesIn.value = String(settings.maxPages);
       pagesValD.textContent = String(settings.maxPages);
       dtypeSel.value = settings.dtype;
