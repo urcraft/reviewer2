@@ -9,6 +9,7 @@ import {
   type Dtype,
 } from './model-registry';
 import { estimateLargestBufferBytes, formatGB, type GpuInfo } from './gpu-info';
+import { fetchFreeModels } from './openrouter';
 import { loadSettings, saveSettings, type Settings, type Device } from './settings';
 import { debugBus, formatEvents } from './debug';
 import { renderMarkdown } from './markdown';
@@ -176,8 +177,9 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     // Cloud: no GPU/capacity story — show a cloud chip and nudge for a key.
     if (settings.provider === 'openrouter') {
       modelHint.appendChild(el('span', { className: 'tier-chip cloud-chip' }, ['cloud']));
+      const modelLabel = settings.openrouterModelId || OPENROUTER_MODEL_ID;
       modelHint.appendChild(
-        el('span', { className: 'model-hint-text' }, ['free via OpenRouter · pages are sent to OpenRouter']),
+        el('span', { className: 'model-hint-text' }, [`${modelLabel} · via OpenRouter · pages are sent to OpenRouter`]),
       );
       if (!settings.openrouterApiKey) {
         modelHint.appendChild(
@@ -505,6 +507,62 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       ]),
     ]);
 
+    // Model picker: a text field (type any slug) backed by a datalist of free,
+    // image-capable models fetched live. Default is the openrouter/free router.
+    const modelList = el('datalist', { id: 'or-free-models' }) as HTMLDataListElement;
+    const modelIdInput = el('input', {
+      type: 'text',
+      className: 'field-input',
+      list: 'or-free-models',
+      placeholder: OPENROUTER_MODEL_ID,
+      autocomplete: 'off',
+      spellcheck: 'false',
+      value: settings.openrouterModelId,
+      oninput: (e: Event) => {
+        settings = { ...settings, openrouterModelId: (e.target as HTMLInputElement).value.trim() };
+        saveSettings(settings);
+        cbs.onSettingsChange(settings);
+        syncModelHint();
+      },
+    }) as HTMLInputElement;
+    const modelStatus = el('span', { className: 'field-help' }, ['']);
+    const modelIdField = el('div', { className: 'field' }, [
+      el('label', { className: 'field-label' }, ['OpenRouter model']),
+      modelIdInput,
+      modelList,
+      el('div', { className: 'field-help' }, [
+        'Default ',
+        el('code', null, [OPENROUTER_MODEL_ID]),
+        ' auto-picks any free model. Or pick/type a specific one (e.g. ',
+        el('code', null, ['google/gemma-3-27b-it:free']),
+        '). ',
+        el('a', { href: 'https://openrouter.ai/models?max_price=0', target: '_blank', rel: 'noopener' }, ['Browse free models →']),
+      ]),
+      modelStatus,
+    ]);
+
+    // Fetch the free-model list once and fill the datalist (best-effort).
+    let modelsLoaded = false;
+    async function loadFreeModels() {
+      if (modelsLoaded) return;
+      modelsLoaded = true;
+      modelStatus.textContent = 'Loading free models…';
+      try {
+        const models = await fetchFreeModels(settings.openrouterApiKey || undefined);
+        modelList.innerHTML = '';
+        // The router first, then every free vision model.
+        for (const id of [OPENROUTER_MODEL_ID, ...models.map((m) => m.id)]) {
+          const opt = document.createElement('option');
+          opt.value = id;
+          modelList.appendChild(opt);
+        }
+        modelStatus.textContent = `${models.length} free vision model(s) available`;
+      } catch (err) {
+        modelsLoaded = false; // allow a retry next open
+        modelStatus.textContent = `Couldn't load the model list — type a slug manually. (${err instanceof Error ? err.message : String(err)})`;
+      }
+    }
+
     const pagesIn = el('input', {
       type: 'range', min: '1', max: '10', step: '1',
       className: 'slider',
@@ -589,7 +647,9 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     const syncDrawerFields = () => {
       const cloud = settings.provider === 'openrouter';
       apiKeyField.style.display = cloud ? '' : 'none';
+      modelIdField.style.display = cloud ? '' : 'none';
       for (const f of [dtypeField, deviceField, cacheField]) f.style.display = cloud ? 'none' : '';
+      if (cloud) void loadFreeModels();
     };
 
     const body = el('div', { className: 'drawer-body' }, [
@@ -599,6 +659,7 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
         modelHelp,
       ]),
       apiKeyField,
+      modelIdField,
       el('div', { className: 'field' }, [
         el('label', { className: 'field-label' }, ['Pages to send']),
         el('div', { className: 'field-row' }, [pagesIn, pagesValD]),
@@ -627,6 +688,7 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     function refresh() {
       modelSel.value = currentModelValue(settings);
       apiKeyIn.value = settings.openrouterApiKey;
+      modelIdInput.value = settings.openrouterModelId;
       pagesIn.value = String(settings.maxPages);
       pagesValD.textContent = String(settings.maxPages);
       dtypeSel.value = settings.dtype;
