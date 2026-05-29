@@ -17,6 +17,12 @@ let worker = spawnWorker();
 // True after any WebGPU/capacity failure — the device may be dead, so the
 // next run respawns the worker from scratch to get a clean GPU context.
 let workerNeedsReset = false;
+// The model key (`modelId|dtype|device`) currently resident in the worker, or
+// null if none. ORT's WebGPU backend doesn't reliably release VRAM when a model
+// is disposed, so switching models in the same worker can OOM on the leftover
+// buffers ("memory access out of bounds" mid-generation). We respawn the worker
+// on a switch to hand the new model a pristine GPU device instead.
+let loadedModelKey: string | null = null;
 
 function spawnWorker(): Worker {
   const w = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
@@ -29,6 +35,7 @@ function resetWorker(reason: string) {
   try { worker.terminate(); } catch { /* ignore */ }
   worker = spawnWorker();
   workerNeedsReset = false;
+  loadedModelKey = null;
   pending = {};
 }
 
@@ -329,7 +336,16 @@ async function review(file: File) {
 
   // One full attempt on a device: load → generate → mark done.
   async function attempt(dev: Device, dt: Dtype) {
+    const key = `${entry.id}|${dt}|${dev}`;
+    // Switching to a different model/dtype/device: respawn first so the new
+    // model loads into a clean GPU device instead of fighting the VRAM that the
+    // previous model's dispose() didn't actually free. Same key → keep the
+    // worker so a re-run reuses the already-loaded model.
+    if (loadedModelKey && loadedModelKey !== key) {
+      resetWorker('model switch — fresh GPU device');
+    }
     await ensureModel(dev, dt);
+    loadedModelKey = key;
     ui.setState({
       phase: 'reviewing',
       phaseLabel: dev === 'wasm' ? 'Roasting on CPU (slower)…' : 'Roasting…',
