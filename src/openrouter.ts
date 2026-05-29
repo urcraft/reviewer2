@@ -6,6 +6,35 @@
 // here touches transformers.js or the worker.
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
+const MODELS_ENDPOINT = 'https://openrouter.ai/api/v1/models';
+
+export type FreeModel = { id: string; name: string };
+
+// Fetch the catalogue and keep the free, image-capable models — this is a vision
+// task, so text-only models can't read the pages. The public /models endpoint is
+// CORS-enabled and needs no auth, but we send the key if we have one. Failures are
+// non-fatal: the caller just falls back to free-text entry.
+export async function fetchFreeModels(apiKey?: string): Promise<FreeModel[]> {
+  const headers: Record<string, string> = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const res = await fetch(MODELS_ENDPOINT, { headers });
+  if (!res.ok) throw new Error(`OpenRouter /models failed (${res.status})`);
+  const json = (await res.json()) as {
+    data?: Array<{
+      id: string;
+      name?: string;
+      architecture?: { input_modalities?: string[] };
+      pricing?: { prompt?: string; completion?: string };
+    }>;
+  };
+  const isFree = (m: { id: string; pricing?: { prompt?: string; completion?: string } }) =>
+    m.id.endsWith(':free') || (m.pricing?.prompt === '0' && m.pricing?.completion === '0');
+  return (json.data ?? [])
+    .filter((m) => isFree(m) && (m.architecture?.input_modalities ?? []).includes('image'))
+    .map((m) => ({ id: m.id, name: m.name ?? m.id }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
 
 export type OpenRouterOptions = {
   apiKey: string;

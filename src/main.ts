@@ -3,6 +3,7 @@ import { mountUi } from './ui';
 import { renderPdf, stitchPages, pageImageToDataUrl } from './pdf';
 import { findModel, type Dtype, type ModelEntry } from './model-registry';
 import { runOpenRouter } from './openrouter';
+import { OPENROUTER_MODEL_ID } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
 import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT, REVIEWER_2_PREFILL } from './prompts';
@@ -423,15 +424,16 @@ async function reviewWithOpenRouter(pages: PageImage[]) {
     progressMeta: '',
   });
 
+  const model = currentSettings.openrouterModelId || OPENROUTER_MODEL_ID;
   const imageDataUrls = pages.map((p) => pageImageToDataUrl(p));
-  debugBus.info(`openrouter: ${imageDataUrls.length} page image(s) · model ${currentSettings.openrouterModelId}`);
+  debugBus.info(`openrouter: ${imageDataUrls.length} page image(s) · model ${model}`);
 
   const stream = createStream();
   currentAbort = new AbortController();
   try {
     const r = await runOpenRouter({
       apiKey: currentSettings.openrouterApiKey,
-      model: currentSettings.openrouterModelId,
+      model,
       systemPrompt: REVIEWER_2_SYSTEM_PROMPT,
       userPrompt: REVIEWER_2_USER_PROMPT,
       imageDataUrls,
