@@ -2,6 +2,7 @@ import {
   AutoProcessor,
   AutoModelForImageTextToText,
   Gemma4ForConditionalGeneration,
+  Lfm2VlForConditionalGeneration,
   TextStreamer,
   InterruptableStoppingCriteria,
   RawImage,
@@ -17,6 +18,7 @@ import type {
 
 const MODEL_CLASSES: Record<ModelClassId, typeof AutoModelForImageTextToText> = {
   Gemma4ForConditionalGeneration: Gemma4ForConditionalGeneration as unknown as typeof AutoModelForImageTextToText,
+  Lfm2VlForConditionalGeneration: Lfm2VlForConditionalGeneration as unknown as typeof AutoModelForImageTextToText,
   AutoModelForImageTextToText,
 };
 

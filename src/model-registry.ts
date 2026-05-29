@@ -1,6 +1,9 @@
 export type Dtype = 'q4' | 'q4f16' | 'q8' | 'fp16' | 'fp32';
 
-export type ModelClassId = 'Gemma4ForConditionalGeneration' | 'AutoModelForImageTextToText';
+export type ModelClassId =
+  | 'Gemma4ForConditionalGeneration'
+  | 'Lfm2VlForConditionalGeneration'
+  | 'AutoModelForImageTextToText';
 
 export type Tier = 'tiny' | 'small' | 'mid';
 
@@ -68,6 +71,16 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     defaultDtype: 'q4f16',
     tier: 'small',
     note: 'Visual Q&A focused. Decent at description, weaker at sustained snark.',
+  },
+  {
+    id: 'onnx-community/LFM2-VL-450M-ONNX',
+    label: 'LFM2-VL 450M  ·  Liquid',
+    sizeNote: '~600 MB · q4f16',
+    multimodal: true,
+    modelClass: 'Lfm2VlForConditionalGeneration',
+    defaultDtype: 'q4f16',
+    tier: 'small',
+    note: 'Liquid AI’s small VL model. Fast edge-inference focus; lighter than the 1B-class options.',
   },
   {
     id: 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct',
