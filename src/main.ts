@@ -58,8 +58,16 @@ const ui = mountUi(app, {
   },
   onSettingsChange: (s) => {
     const modelChanged = s.modelId !== currentSettings.modelId;
+    // Switching to the cloud provider while a local model is resident: free its
+    // VRAM now rather than leaving it parked until the next local run. The cloud
+    // path never touches the worker, so respawning a fresh (empty) one is cheap.
+    const switchedToCloud =
+      currentSettings.provider !== 'openrouter' && s.provider === 'openrouter';
     currentSettings = s;
     saveSettings(s);
+    if (switchedToCloud && loadedModelKey) {
+      resetWorker('switched to OpenRouter — free local model VRAM');
+    }
     // If we crashed earlier, force a fresh worker on the next run so the new
     // model doesn't inherit a dead GPU device. Marking instead of resetting
     // immediately avoids killing an in-progress download.
