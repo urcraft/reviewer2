@@ -209,16 +209,30 @@ function createStream() {
     tokens: 0,
     start: 0,
     onToken(chunk: string) {
-      if (stream.start === 0) stream.start = performance.now();
-      stream.buffer += chunk;
       stream.tokens += 1;
+      stream.buffer += chunk;
       debugBus.appendRaw(chunk);
+      // Start the clock at the first token (so model-load latency isn't billed
+      // to the rate) and measure throughput across the gaps *between* tokens —
+      // i.e. over (tokens - 1) intervals. Timing the first token against its own
+      // arrival divides by ~0 and reports nonsense like 33333 tok/s.
+      if (stream.tokens === 1) {
+        stream.start = performance.now();
+        ui.setState({
+          reviewMarkdown: stream.buffer,
+          tokens: 1,
+          elapsedMs: 0,
+          progressMeta: '1 tok',
+        });
+        return;
+      }
       const elapsedMs = performance.now() - stream.start;
+      const tps = elapsedMs > 0 ? (stream.tokens - 1) / (elapsedMs / 1000) : 0;
       ui.setState({
         reviewMarkdown: stream.buffer,
         tokens: stream.tokens,
         elapsedMs,
-        progressMeta: `${stream.tokens} tok · ${(stream.tokens / (elapsedMs / 1000)).toFixed(1)} tok/s`,
+        progressMeta: `${stream.tokens} tok · ${tps.toFixed(1)} tok/s`,
       });
     },
   };

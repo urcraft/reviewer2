@@ -360,7 +360,10 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       }
       debugContent.scrollTop = debugContent.scrollHeight;
     }
-    const tps = state.elapsedMs > 0 ? (state.tokens / (state.elapsedMs / 1000)).toFixed(1) : '0.0';
+    // Throughput over (tokens - 1) inter-token gaps — see createStream(); the
+    // first token's own arrival isn't a meaningful interval.
+    const decoded = Math.max(state.tokens - 1, 0);
+    const tps = state.elapsedMs > 0 ? (decoded / (state.elapsedMs / 1000)).toFixed(1) : '0.0';
     debugStats.textContent = state.tokens > 0
       ? `tokens: ${state.tokens} · ${(state.elapsedMs / 1000).toFixed(1)}s · ${tps} tok/s`
       : '';
