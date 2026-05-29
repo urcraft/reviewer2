@@ -18,6 +18,11 @@ export type ModelEntry = {
   note?: string;
   // transformers.js processor only handles one image — stitch pages first.
   singleImage?: boolean;
+  // Llava-family processors (LFM2-VL, Llava, Moondream) define _call(images, text)
+  // — the reverse of Gemma/SmolVLM/Qwen which are _call(text, images). When true
+  // the worker calls processor(images, text). The worker also catch-and-flips as a
+  // safety net, since processor param names are minified in the production build.
+  imagesFirst?: boolean;
 };
 
 export const MODEL_REGISTRY: ModelEntry[] = [
@@ -80,6 +85,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
     modelClass: 'Lfm2VlForConditionalGeneration',
     defaultDtype: 'q4f16',
     tier: 'small',
+    imagesFirst: true,
     note: 'Liquid AI’s small VL model. Fast edge-inference focus; lighter than the 1B-class options.',
   },
   {

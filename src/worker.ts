@@ -7,7 +7,7 @@ import {
   InterruptableStoppingCriteria,
   RawImage,
 } from '@huggingface/transformers';
-import { findModel, type ModelClassId } from './model-registry';
+import { findModel, type ModelClassId, type ModelEntry } from './model-registry';
 import type {
   WorkerRequest,
   WorkerResponse,
@@ -24,6 +24,7 @@ const MODEL_CLASSES: Record<ModelClassId, typeof AutoModelForImageTextToText> = 
 
 type Loaded = {
   key: string;
+  entry: ModelEntry;
   processor: unknown;
   model: unknown;
 };
@@ -100,7 +101,7 @@ async function handleLoad({ modelId, dtype, device }: LoadRequest) {
       device: device as never,
       progress_callback: onProgress as never,
     });
-    loaded = { key, processor, model };
+    loaded = { key, entry, processor, model };
     log('info', `model: loaded ${modelId} on ${device}/${dtype}`);
     post({ type: 'loaded' });
   } catch (err) {
@@ -115,7 +116,7 @@ async function handleGenerate(req: GenerateRequest) {
     post({ type: 'generateError', message: 'No model loaded.', isWebGpu: false });
     return;
   }
-  const { processor, model } = loaded;
+  const { entry, processor, model } = loaded;
 
   const images = req.images.map(
     (p: PageImage) => new RawImage(p.data, p.width, p.height, 4),
@@ -140,10 +141,33 @@ async function handleGenerate(req: GenerateRequest) {
     const text = proc.apply_chat_template(messages, { add_generation_prompt: true });
 
     log('info', 'processor: encoding text + images');
-    const inputs = await (processor as unknown as (
-      t: string,
-      i: RawImage[],
-    ) => Promise<Record<string, unknown>>)(text, images);
+    // Processor _call signature differs by model family: Gemma/SmolVLM/Qwen are
+    // (text, images); the Llava family (LFM2-VL, Moondream) is (images, text).
+    // The registry flags the known reversed models; if an unflagged model throws
+    // a structural error here we flip the order once and retry (param names are
+    // minified in prod, so we can't detect the signature at runtime).
+    const callProcessor = (imagesFirst: boolean) => {
+      const encode = processor as unknown as (
+        a: string | RawImage[],
+        b: string | RawImage[],
+      ) => Promise<Record<string, unknown>>;
+      return imagesFirst ? encode(images, text) : encode(text, images);
+    };
+
+    let inputs: Record<string, unknown>;
+    const imagesFirst = entry.imagesFirst ?? false;
+    try {
+      inputs = await callProcessor(imagesFirst);
+    } catch (err) {
+      // Don't retry on GPU/OOM failures — only on the (text, images) vs
+      // (images, text) ordering mismatch, which surfaces as a TypeError.
+      if (isWebGpuError(err)) throw err;
+      log(
+        'warn',
+        `processor failed (${err instanceof Error ? err.message : String(err)}); retrying with image/text order flipped`,
+      );
+      inputs = await callProcessor(!imagesFirst);
+    }
 
     stopping = new InterruptableStoppingCriteria();
     const start = performance.now();
