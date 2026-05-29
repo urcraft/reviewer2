@@ -10,29 +10,56 @@ const MODELS_ENDPOINT = 'https://openrouter.ai/api/v1/models';
 
 export type FreeModel = { id: string; name: string };
 
-// Fetch the catalogue and keep the free, image-capable models — this is a vision
-// task, so text-only models can't read the pages. The public /models endpoint is
-// CORS-enabled and needs no auth, but we send the key if we have one. Failures are
-// non-fatal: the caller just falls back to free-text entry.
+type RawModel = {
+  id: string;
+  name?: string;
+  architecture?: {
+    input_modalities?: string[];
+    output_modalities?: string[];
+    modality?: string; // legacy "text+image->text"
+  };
+};
+
+// Resolve input/output modalities, falling back to the legacy "in->out" string.
+function modalitiesOf(a: RawModel['architecture']) {
+  let inputs = a?.input_modalities;
+  let outputs = a?.output_modalities;
+  if ((!inputs || !outputs) && typeof a?.modality === 'string') {
+    const [inp, out] = a.modality.split('->');
+    inputs = inputs ?? (inp ? inp.split('+') : []);
+    outputs = outputs ?? (out ? out.split('+') : []);
+  }
+  return { inputs: inputs ?? [], outputs: outputs ?? [] };
+}
+
+// Keep only models that fit the task: free, accept image input (to read the
+// pages), and produce text output (the review).
+//
+// "Free" = OpenRouter's canonical ":free" suffix. A pricing-based guess
+// (prompt/completion == "0") wrongly catches models billed per other units —
+// e.g. Lyria (music) is priced per second, so its token prices read 0 and it
+// outputs audio, not text.
+export function filterFreeVisionModels(data: RawModel[]): FreeModel[] {
+  return data
+    .filter((m) => {
+      if (!m.id.endsWith(':free')) return false;
+      const { inputs, outputs } = modalitiesOf(m.architecture);
+      return inputs.includes('image') && outputs.includes('text');
+    })
+    .map((m) => ({ id: m.id, name: m.name ?? m.id }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// Fetch the catalogue and keep the free image->text models. The public /models
+// endpoint is CORS-enabled and needs no auth, but we send the key if we have one.
+// Failures are non-fatal: the caller just falls back to manual entry.
 export async function fetchFreeModels(apiKey?: string): Promise<FreeModel[]> {
   const headers: Record<string, string> = {};
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   const res = await fetch(MODELS_ENDPOINT, { headers });
   if (!res.ok) throw new Error(`OpenRouter /models failed (${res.status})`);
-  const json = (await res.json()) as {
-    data?: Array<{
-      id: string;
-      name?: string;
-      architecture?: { input_modalities?: string[] };
-      pricing?: { prompt?: string; completion?: string };
-    }>;
-  };
-  const isFree = (m: { id: string; pricing?: { prompt?: string; completion?: string } }) =>
-    m.id.endsWith(':free') || (m.pricing?.prompt === '0' && m.pricing?.completion === '0');
-  return (json.data ?? [])
-    .filter((m) => isFree(m) && (m.architecture?.input_modalities ?? []).includes('image'))
-    .map((m) => ({ id: m.id, name: m.name ?? m.id }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+  const json = (await res.json()) as { data?: RawModel[] };
+  return filterFreeVisionModels(json.data ?? []);
 }
 
 
