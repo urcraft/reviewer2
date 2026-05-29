@@ -6,7 +6,7 @@ import { runOpenRouter } from './openrouter';
 import { OPENROUTER_MODEL_ID } from './model-registry';
 import { debugBus } from './debug';
 import { loadSettings, saveSettings } from './settings';
-import { REVIEWER_2_SYSTEM_PROMPT, REVIEWER_2_USER_PROMPT, REVIEWER_2_PREFILL } from './prompts';
+import { findPromptVariant } from './prompts';
 import { probeGpu, estimateLargestBufferBytes, formatGB, type GpuInfo } from './gpu-info';
 import type { PageImage, WorkerResponse, Device } from './worker-protocol';
 
@@ -247,15 +247,16 @@ function runGeneration(
   onToken: (t: string) => void,
 ): Promise<{ tokens: number; elapsedMs: number; interrupted: boolean }> {
   pending.onToken = onToken;
+  const variant = findPromptVariant(currentSettings.promptVariant);
   return new Promise((resolve, reject) => {
     pending.resolveGen = resolve;
     pending.rejectGen = reject;
     worker.postMessage({
       type: 'generate',
       images,
-      systemPrompt: REVIEWER_2_SYSTEM_PROMPT,
-      userPrompt: REVIEWER_2_USER_PROMPT,
-      prefill: REVIEWER_2_PREFILL,
+      systemPrompt: variant.system,
+      userPrompt: variant.user,
+      prefill: variant.prefill,
       maxNewTokens,
     });
   });
@@ -428,14 +429,15 @@ async function reviewWithOpenRouter(pages: PageImage[]) {
   const imageDataUrls = pages.map((p) => pageImageToDataUrl(p));
   debugBus.info(`openrouter: ${imageDataUrls.length} page image(s) · model ${model}`);
 
+  const variant = findPromptVariant(currentSettings.promptVariant);
   const stream = createStream();
   currentAbort = new AbortController();
   try {
     const r = await runOpenRouter({
       apiKey: currentSettings.openrouterApiKey,
       model,
-      systemPrompt: REVIEWER_2_SYSTEM_PROMPT,
-      userPrompt: REVIEWER_2_USER_PROMPT,
+      systemPrompt: variant.system,
+      userPrompt: variant.user,
       imageDataUrls,
       signal: currentAbort.signal,
       onToken: stream.onToken,

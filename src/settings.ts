@@ -1,4 +1,5 @@
 import { MODEL_REGISTRY, type Dtype } from './model-registry';
+import { DEFAULT_PROMPT_VARIANT_ID } from './prompts';
 
 const KEY = 'reviewer2.settings.v1';
 
@@ -13,6 +14,8 @@ export type Settings = {
   openrouterApiKey: string;
   openrouterModelId: string;
   maxPages: number;
+  // Which Reviewer 2 persona to use — see PROMPT_VARIANTS in prompts.ts.
+  promptVariant: string;
   dtype: Dtype | 'default';
   device: Device;
   showDebug: boolean;
@@ -26,6 +29,7 @@ const DEFAULTS: Settings = {
   openrouterApiKey: '',
   openrouterModelId: 'openrouter/free',
   maxPages: 3,
+  promptVariant: DEFAULT_PROMPT_VARIANT_ID,
   dtype: 'default',
   device: 'auto',
   showDebug: false,
