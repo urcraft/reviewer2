@@ -50,19 +50,23 @@ import { chromium } from 'playwright';
   console.log(`✓ drawer key field value="${keyVal}"`);
   if (keyVal !== 'sk-or-v1-testkey') throw new Error('key not persisted to drawer');
 
-  // OpenRouter model picker: defaults to the router, accepts a custom slug, and
-  // the header hint reflects the chosen model.
-  const modelInput = page.locator('.drawer input[list="or-free-models"]');
-  const defaultModel = await modelInput.inputValue();
-  console.log(`✓ model picker default="${defaultModel}"`);
-  if (defaultModel !== 'openrouter/free') throw new Error('model picker default wrong');
-  await modelInput.fill('google/gemma-3-27b-it:free');
+  // OpenRouter model picker: a real dropdown defaulting to the router, with a
+  // "Custom…" entry that reveals a slug input; the header hint follows the choice.
+  // (The drawer has two .field-select now: [0] = source/model, [1] = OpenRouter model.)
+  const modelSelect = page.locator('.drawer .field-select').nth(1);
+  const defaultModel = await modelSelect.inputValue();
+  console.log(`✓ model dropdown default="${defaultModel}"`);
+  if (defaultModel !== 'openrouter/free') throw new Error('model dropdown default wrong');
+  await modelSelect.selectOption('__custom__');
+  const customInput = page.locator('.drawer input[placeholder^="e.g."]');
+  await customInput.waitFor({ state: 'visible', timeout: 2000 });
+  await customInput.fill('google/gemma-3-27b-it:free');
   await page.waitForTimeout(50);
   const hintText = await page.textContent('.model-hint-text');
   console.log(`✓ hint reflects custom model: "${hintText}"`);
   if (!hintText?.includes('google/gemma-3-27b-it:free')) throw new Error('hint did not update');
   // Reset to the router so the local-switch check below is clean.
-  await modelInput.fill('openrouter/free');
+  await modelSelect.selectOption('openrouter/free');
 
   // Switch to a local model via the drawer dropdown → provider flips to local.
   await page.selectOption('.drawer .field-select', { index: 1 }); // first local model in the optgroup

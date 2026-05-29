@@ -507,59 +507,104 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
       ]),
     ]);
 
-    // Model picker: a text field (type any slug) backed by a datalist of free,
-    // image-capable models fetched live. Default is the openrouter/free router.
-    const modelList = el('datalist', { id: 'or-free-models' }) as HTMLDataListElement;
-    const modelIdInput = el('input', {
+    // Model picker: a real dropdown of free, image-capable models (fetched live),
+    // plus a "Custom…" entry that reveals a text field for any slug. Default is
+    // the openrouter/free router.
+    const CUSTOM = '__custom__';
+    function applyModel(id: string) {
+      settings = { ...settings, openrouterModelId: id };
+      saveSettings(settings);
+      cbs.onSettingsChange(settings);
+      syncModelHint();
+    }
+
+    const customInput = el('input', {
       type: 'text',
       className: 'field-input',
-      list: 'or-free-models',
-      placeholder: OPENROUTER_MODEL_ID,
+      placeholder: 'e.g. google/gemma-3-27b-it:free',
       autocomplete: 'off',
       spellcheck: 'false',
-      value: settings.openrouterModelId,
-      oninput: (e: Event) => {
-        settings = { ...settings, openrouterModelId: (e.target as HTMLInputElement).value.trim() };
-        saveSettings(settings);
-        cbs.onSettingsChange(settings);
-        syncModelHint();
-      },
+      oninput: (e: Event) => applyModel((e.target as HTMLInputElement).value.trim()),
     }) as HTMLInputElement;
+    const customWrap = el('div', { style: { marginTop: '8px' } }, [customInput]);
+
+    const modelIdSelect = el('select', {
+      className: 'field-select',
+      onchange: (e: Event) => {
+        const v = (e.target as HTMLSelectElement).value;
+        if (v === CUSTOM) {
+          customWrap.style.display = '';
+          applyModel(customInput.value.trim());
+          customInput.focus();
+        } else {
+          customWrap.style.display = 'none';
+          applyModel(v);
+        }
+      },
+    }) as HTMLSelectElement;
+
     const modelStatus = el('span', { className: 'field-help' }, ['']);
+    // Cache the fetched list so reopening the drawer doesn't wipe the options.
+    let cachedModels: { id: string; name: string }[] = [];
+
+    // (Re)build the dropdown from the fetched list and reflect the saved value.
+    // A saved slug that isn't in the list (custom or stale) selects "Custom…".
+    function rebuildModelOptions(models: { id: string; name: string }[]) {
+      modelIdSelect.innerHTML = '';
+      const add = (value: string, label: string) => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = label;
+        modelIdSelect.appendChild(opt);
+      };
+      add(OPENROUTER_MODEL_ID, `${OPENROUTER_MODEL_ID}  (auto-pick any free model)`);
+      for (const m of models) add(m.id, m.name === m.id ? m.id : `${m.name}  ·  ${m.id}`);
+      add(CUSTOM, 'Custom model ID…');
+
+      const saved = settings.openrouterModelId;
+      if (saved === OPENROUTER_MODEL_ID || models.some((m) => m.id === saved)) {
+        modelIdSelect.value = saved;
+        customWrap.style.display = 'none';
+      } else if (saved) {
+        // A non-empty slug that isn't in the list → custom entry.
+        modelIdSelect.value = CUSTOM;
+        customInput.value = saved;
+        customWrap.style.display = '';
+      } else {
+        // Blank → fall back to the router.
+        modelIdSelect.value = OPENROUTER_MODEL_ID;
+        customWrap.style.display = 'none';
+      }
+    }
+
     const modelIdField = el('div', { className: 'field' }, [
       el('label', { className: 'field-label' }, ['OpenRouter model']),
-      modelIdInput,
-      modelList,
+      modelIdSelect,
+      customWrap,
       el('div', { className: 'field-help' }, [
         'Default ',
         el('code', null, [OPENROUTER_MODEL_ID]),
-        ' auto-picks any free model. Or pick/type a specific one (e.g. ',
-        el('code', null, ['google/gemma-3-27b-it:free']),
-        '). ',
+        ' auto-picks any free model. Or choose a specific free vision model below. ',
         el('a', { href: 'https://openrouter.ai/models?max_price=0', target: '_blank', rel: 'noopener' }, ['Browse free models →']),
       ]),
       modelStatus,
     ]);
+    customWrap.style.display = 'none';
+    rebuildModelOptions(cachedModels); // router + Custom until the live list arrives
 
-    // Fetch the free-model list once and fill the datalist (best-effort).
+    // Fetch the free-model list once and rebuild the dropdown (best-effort).
     let modelsLoaded = false;
     async function loadFreeModels() {
       if (modelsLoaded) return;
       modelsLoaded = true;
       modelStatus.textContent = 'Loading free models…';
       try {
-        const models = await fetchFreeModels(settings.openrouterApiKey || undefined);
-        modelList.innerHTML = '';
-        // The router first, then every free vision model.
-        for (const id of [OPENROUTER_MODEL_ID, ...models.map((m) => m.id)]) {
-          const opt = document.createElement('option');
-          opt.value = id;
-          modelList.appendChild(opt);
-        }
-        modelStatus.textContent = `${models.length} free vision model(s) available`;
+        cachedModels = await fetchFreeModels(settings.openrouterApiKey || undefined);
+        rebuildModelOptions(cachedModels);
+        modelStatus.textContent = `${cachedModels.length} free vision model(s) available`;
       } catch (err) {
         modelsLoaded = false; // allow a retry next open
-        modelStatus.textContent = `Couldn't load the model list — type a slug manually. (${err instanceof Error ? err.message : String(err)})`;
+        modelStatus.textContent = `Couldn't load the model list — use "Custom model ID…" to enter one. (${err instanceof Error ? err.message : String(err)})`;
       }
     }
 
@@ -688,7 +733,7 @@ export function mountUi(host: HTMLElement, cbs: UiCallbacks): Ui {
     function refresh() {
       modelSel.value = currentModelValue(settings);
       apiKeyIn.value = settings.openrouterApiKey;
-      modelIdInput.value = settings.openrouterModelId;
+      rebuildModelOptions(cachedModels);
       pagesIn.value = String(settings.maxPages);
       pagesValD.textContent = String(settings.maxPages);
       dtypeSel.value = settings.dtype;
